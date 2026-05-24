@@ -61,7 +61,7 @@ check_prereqs() {
 build_images() {
     info "Budowanie obrazów Docker..."
 
-    local services=("cpu-service" "io-service")
+    local services=("cpu-service" "io-service" "echo-server")
     for svc in "${services[@]}"; do
         info "Budowanie ${svc}..."
         docker build -t "${svc}:latest" "${APPS_DIR}/${svc}/"
@@ -73,7 +73,7 @@ build_images() {
 import_to_k3s() {
     info "Importowanie obrazów do containerd k3s..."
 
-    local services=("cpu-service" "io-service")
+    local services=("cpu-service" "io-service" "echo-server")
     for svc in "${services[@]}"; do
         info "Importowanie ${svc}:latest → containerd k3s..."
         
@@ -124,6 +124,10 @@ apply_manifests() {
         kubectl apply -f "${K8S_DIR}/${app}/hpa-cpu.yaml"
     done
 
+    # 3b. Echo-server (brak HPA)
+    info "Deployowanie echo-service..."
+    kubectl apply -f "${K8S_DIR}/echo-service/"
+
     # 4. Ingress (na końcu, po serwisach)
     kubectl apply -f "${K8S_DIR}/ingress.yaml"
 
@@ -134,7 +138,7 @@ apply_manifests() {
 wait_for_ready() {
     info "Czekanie na gotowość deploymentów (max 120s)..."
 
-    local deployments=("cpu-service" "io-service" "prometheus" "grafana" "prometheus-adapter")
+    local deployments=("cpu-service" "io-service" "echo-service" "prometheus" "grafana" "prometheus-adapter")
     for dep in "${deployments[@]}"; do
         info "Czekanie na ${dep}..."
         if kubectl -n "${NAMESPACE}" rollout status "deployment/${dep}" --timeout=120s 2>/dev/null; then
@@ -153,6 +157,8 @@ print_summary() {
     echo "=============================================================================="
     echo ""
     echo "  Namespace: ${NAMESPACE}"
+    echo ""
+    echo "  Serwisy: cpu-service, io-service, echo-service"
     echo ""
     echo "  Pody:"
     kubectl -n "${NAMESPACE}" get pods -o wide 2>/dev/null || true

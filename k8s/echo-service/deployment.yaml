@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-service
+  namespace: magisterka
+  labels:
+    app: echo-service
+    tier: backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-service
+  template:
+    metadata:
+      labels:
+        app: echo-service
+        tier: backend
+    spec:
+      containers:
+        - name: echo-service
+          image: echo-service:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10

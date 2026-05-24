@@ -36,6 +36,11 @@ data:
             action: keep
             regex: "8000"
 
+      - job_name: 'echo-service'
+        scrape_interval: 15s
+        static_configs:
+          - targets: ['echo-service.magisterka.svc.cluster.local:8000']
+
       - job_name: 'prometheus'
         static_configs:
           - targets: ['localhost:9090']

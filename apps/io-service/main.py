@@ -141,7 +141,7 @@ instrumentator.expose(app, endpoint="/metrics", include_in_schema=True)
 # Helpers
 # ---------------------------------------------------------------------------
 
-_UPSTREAM_BASE_URL = "http://localhost:8000"
+_UPSTREAM_BASE_URL = "http://echo-service:8000"
 
 
 def _validate_query_params(delay: int, steps: int) -> None:

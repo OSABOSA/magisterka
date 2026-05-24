@@ -40,6 +40,7 @@ TESTS_DIR="${PROJECT_DIR}/tests/k6"
 RESULTS_DIR="${PROJECT_DIR}/results"
 K8S_DIR="${PROJECT_DIR}/k8s"
 NAMESPACE="magisterka"
+REPETITIONS=5
 
 # Porty dla port-forward
 CPU_PORT=8080
@@ -198,6 +199,26 @@ reset_deployment() {
     ok "  ${service} gotowy (${replicas} replika(i))"
 }
 
+# ---- Cooldown między scenariuszami (D7) -------------------------------------
+cooldown() {
+    info "===== COOLDOWN: Stabilizacja klastra (120s) ====="
+
+    # 1. Skaluj oba serwisy do 1 repliki
+    info "Skalowanie cpu-service i io-service → 1 replika..."
+    ${KUBECTL} -n "${NAMESPACE}" scale deployment cpu-service io-service --replicas=1 2>/dev/null || true
+
+    # 2. Usuń wszystkie aktywne HPA
+    info "Usuwanie wszystkich HPA w namespace ${NAMESPACE}..."
+    ${KUBECTL} -n "${NAMESPACE}" delete hpa --all --ignore-not-found=true 2>/dev/null || true
+
+    # 3. Czekaj 120s na stabilizację
+    info "Oczekiwanie 120s na stabilizację klastra..."
+    sleep 120
+
+    ok "Cooldown zakończony — klaster ustabilizowany"
+    echo ""
+}
+
 # ---- Uruchamianie pojedynczego scenariusza ----------------------------------
 run_scenario() {
     local scenario="$1"          # np. "cpu-cpu"
@@ -207,20 +228,13 @@ run_scenario() {
     local base_url="$5"          # URL serwisu (localhost:PORT)
     local description="$6"       # opis do logów
 
-    local timestamp
-    timestamp=$(date +%Y%m%d_%H%M%S)
-    local scenario_dir="${RESULTS_DIR}/${scenario}"
-    mkdir -p "${scenario_dir}"
-
-    local json_output="${scenario_dir}/${scenario}_${timestamp}.json"
-    local txt_output="${scenario_dir}/${scenario}_${timestamp}.txt"
-
     echo ""
     echo "============================================================================"
     info "SCENARIUSZ: ${scenario}"
     info "Opis:     ${description}"
     info "Serwis:   ${service}"
     info "HPA:      ${hpa_strategy}"
+    info "Powtórzeń: ${REPETITIONS}"
     info "Start:    $(date)"
     echo "============================================================================"
 
@@ -230,37 +244,52 @@ run_scenario() {
     # 2. Resetuj deployment
     reset_deployment "${service}" 1
 
-    # 3. Urchom test k6
-    info "Uruchamianie k6: ${k6_script} → ${base_url}"
-    k6 run \
-        --out json="${json_output}" \
-        --summary-export="${json_output}" \
-        -e "BASE_URL=${base_url}" \
-        "${k6_script}" 2>&1 | tee "${txt_output}"
+    # 3. Uruchom test k6 REPETITIONS razy (D5)
+    local final_exit_code=0
+    for i in $(seq 1 ${REPETITIONS}); do
+        local timestamp
+        timestamp=$(date +%Y%m%d_%H%M%S)
+        local run_dir="${RESULTS_DIR}/${scenario}/run-${i}"
+        mkdir -p "${run_dir}"
 
-    local exit_code=${PIPESTATUS[0]}
+        local json_output="${run_dir}/${scenario}_run${i}_${timestamp}.json"
+        local txt_output="${run_dir}/${scenario}_run${i}_${timestamp}.txt"
 
-    # 4. Zapisz metadane scenariusza
-    cat > "${scenario_dir}/metadata_${timestamp}.json" << METADATA_EOF
+        info "  Powtórzenie ${i}/${REPETITIONS}: k6 ${k6_script} → ${base_url}"
+        k6 run \
+            --out json="${json_output}" \
+            --summary-export="${json_output}" \
+            -e "BASE_URL=${base_url}" \
+            "${k6_script}" 2>&1 | tee "${txt_output}"
+
+        local exit_code=${PIPESTATUS[0]}
+
+        # Zapisz metadane pojedynczego uruchomienia
+        cat > "${run_dir}/metadata.json" << METADATA_EOF
 {
   "scenario": "${scenario}",
   "service": "${service}",
   "hpa_strategy": "${hpa_strategy}",
   "description": "${description}",
   "k6_script": "${k6_script}",
+  "repetition": ${i},
+  "total_repetitions": ${REPETITIONS},
   "timestamp": "${timestamp}",
   "exit_code": ${exit_code}
 }
 METADATA_EOF
 
-    if [ ${exit_code} -eq 0 ]; then
-        ok "Scenariusz ${scenario} zakończony pomyślnie"
-    else
-        warn "Scenariusz ${scenario} zakończony z kodem ${exit_code}"
-    fi
+        if [ ${exit_code} -eq 0 ]; then
+            ok "  Powtórzenie ${i}/${REPETITIONS} zakończone pomyślnie"
+        else
+            warn "  Powtórzenie ${i}/${REPETITIONS} zakończone z kodem ${exit_code}"
+            final_exit_code=${exit_code}
+        fi
+    done
 
+    ok "Scenariusz ${scenario} zakończony (${REPETITIONS} powtórzeń)"
     echo ""
-    return ${exit_code}
+    return ${final_exit_code}
 }
 
 # ---- Scenariusze — macierz 2×3 + baseline -----------------------------------
@@ -392,6 +421,151 @@ QUICKEOF
     ok "Quick test zakończony"
 }
 
+# ---- Pre-flight test (~5 min, triggers HPA scale-up) ------------------------
+test_preflight() {
+    info "===== PRE-FLIGHT TEST (~5 min) ====="
+    echo ""
+    info "Cel: Wygenerować obciążenie CPU wystarczające do triggerowania HPA scale-up"
+    info "Serwis: cpu-service (HPA CPU, target 50%, minReplicas=2, maxReplicas=10)"
+    info "Endpoint: /fibonacci?n=25 (czysty CPU-bound, O(2^n))"
+    echo ""
+
+    # 1. Ensure cpu-service port-forward
+    info "Uruchamianie port-forward dla cpu-service..."
+    pkill -f "port-forward.*cpu-service.*${NAMESPACE}" 2>/dev/null || true
+    sleep 1
+    nohup ${KUBECTL} -n "${NAMESPACE}" port-forward "svc/cpu-service" "${CPU_PORT}:80" &>/tmp/pf-cpu.log &
+    echo $! > /tmp/pf-cpu.pid
+    sleep 2
+    if curl -sf "http://localhost:${CPU_PORT}/health" &>/dev/null; then
+        ok "cpu-service health OK na localhost:${CPU_PORT}"
+    else
+        err "cpu-service health FAIL — sprawdź /tmp/pf-cpu.log"
+        return 1
+    fi
+
+    # 2. Apply default HPA (CPU)
+    info "Nakładanie HPA CPU na cpu-service..."
+    ${KUBECTL} apply -f "${K8S_DIR}/cpu-service/hpa-cpu.yaml"
+    ok "HPA CPU nałożony (minReplicas=2, maxReplicas=10, target=50% CPU)"
+
+    # 3. Scale to minReplicas to establish baseline
+    info "Skalowanie cpu-service → 2 repliki (HPA baseline)..."
+    ${KUBECTL} -n "${NAMESPACE}" scale deployment cpu-service --replicas=2
+    ${KUBECTL} -n "${NAMESPACE}" rollout status "deployment/cpu-service" --timeout=120s 2>/dev/null || true
+    sleep 3
+    ok "cpu-service: 2 repliki (HPA będzie skalować od tej bazy)"
+
+    # 4. Start Grafana port-forward
+    info "Uruchamianie Grafana port-forward..."
+    pkill -f "port-forward.*grafana.*${NAMESPACE}" 2>/dev/null || true
+    sleep 1
+    nohup ${KUBECTL} -n "${NAMESPACE}" port-forward svc/grafana 3000:3000 &>/tmp/pf-grafana.log &
+    local grafana_pid=$!
+    echo "${grafana_pid}" > /tmp/pf-grafana.pid
+    sleep 2
+
+    echo ""
+    echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${GREEN}║  🌐 Open Grafana at http://localhost:3000                   ║${NC}"
+    echo -e "${GREEN}║     to watch scaling live!                                  ║${NC}"
+    echo -e "${GREEN}║                                                            ║${NC}"
+    echo -e "${GREEN}║  Dashboard: CPU-Service Overview                           ║${NC}"
+    echo -e "${GREEN}║  Default credentials: admin / admin                        ║${NC}"
+    echo -e "${GREEN}║                                                            ║${NC}"
+    echo -e "${GREEN}║  Grafana PID: ${grafana_pid}                                          ║${NC}"
+    echo -e "${GREEN}║  Kill later:  kill ${grafana_pid}                                       ║${NC}"
+    echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # 5. Generate k6 preflight script
+    local preflight_script="${RESULTS_DIR}/preflight-test.js"
+    cat > "${preflight_script}" << 'PREFLIGHTEOF'
+import http from 'k6/http';
+import { check, sleep } from 'k6';
+
+const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
+
+export const options = {
+    scenarios: {
+        fibonacci_ramp: {
+            executor: 'ramping-vus',
+            startVUs: 1,
+            stages: [
+                { duration: '90s', target: 50 },    // ramp-up: 1→50 VUs
+                { duration: '120s', target: 50 },   // steady: 50 VUs sustained
+                { duration: '60s', target: 0 },     // ramp-down: 50→0 VUs
+            ],
+            exec: 'fibonacciBurn',
+            gracefulRampDown: '30s',
+        },
+    },
+    thresholds: {
+        'http_req_duration': ['p(95)<10000'],
+        'http_req_failed': ['rate<0.1'],
+    },
+};
+
+export function fibonacciBurn() {
+    // n=25 gives ~1-5ms per call; 50 concurrent VUs saturate CPU on 2 pods
+    const url = `${BASE_URL}/fibonacci?n=25`;
+    const res = http.get(url);
+
+    check(res, {
+        'fibonacci: status 200': (r) => r.status === 200,
+    });
+
+    // Minimal sleep to keep request rate high
+    sleep(0.05 + Math.random() * 0.1); // 50-150ms
+}
+PREFLIGHTEOF
+
+    # 6. Run the preflight k6 test
+    local timestamp
+    timestamp=$(date +%Y%m%d_%H%M%S)
+    local preflight_dir="${RESULTS_DIR}/preflight"
+    mkdir -p "${preflight_dir}"
+
+    info "Start testu pre-flight: $(date)"
+    info "Czas trwania: ~4.5 min (90s ramp-up + 120s steady + 60s ramp-down)"
+    echo ""
+    info "Obserwuj HPA: kubectl -n ${NAMESPACE} get hpa -w"
+    echo ""
+
+    k6 run \
+        --out json="${preflight_dir}/preflight_${timestamp}.json" \
+        --summary-export="${preflight_dir}/preflight_${timestamp}.json" \
+        -e "BASE_URL=http://localhost:${CPU_PORT}" \
+        "${preflight_script}" 2>&1 | tee "${preflight_dir}/preflight_${timestamp}.txt"
+
+    local exit_code=${PIPESTATUS[0]}
+
+    # 7. Check if HPA scaled
+    echo ""
+    info "===== PRE-FLIGHT RESULTS ====="
+    info "Stan HPA po teście:"
+    ${KUBECTL} -n "${NAMESPACE}" get hpa cpu-service-hpa -o wide 2>/dev/null || true
+    echo ""
+    info "Pody cpu-service:"
+    ${KUBECTL} -n "${NAMESPACE}" get pods -l app=cpu-service -o wide 2>/dev/null || true
+    echo ""
+
+    if [ ${exit_code} -eq 0 ]; then
+        ok "Pre-flight test zakończony pomyślnie (exit code 0)"
+    else
+        warn "Pre-flight test zakończony z kodem ${exit_code}"
+    fi
+
+    echo ""
+    info "Grafana nadal działa na http://localhost:3000 (PID: ${grafana_pid})"
+    info "Aby zatrzymać Grafana: kill ${grafana_pid}"
+    info "Aby zatrzymać cpu-service port-forward: kill $(cat /tmp/pf-cpu.pid 2>/dev/null)"
+    echo ""
+
+    # Clean up temp script
+    rm -f "${preflight_script}"
+}
+
 # ---- Zbieranie metryk Prometheus po testach ---------------------------------
 collect_metrics() {
     info "Zbieranie metryk z Prometheusa..."
@@ -475,21 +649,28 @@ print_summary() {
 run_all() {
     info "===== URUCHAMIANIE WSZYSTKICH SCENARIUSZY (macierz 2×3) ====="
     echo ""
-    info "Całkowity czas: ~48 min (8 scenariuszy × ~6 min)"
+    info "Całkowity czas: ~72 min (8 scenariuszy × 5 powtórzeń × ~1 min + cooldowny)"
     echo ""
 
     # Baseline
     scenario_baseline_cpu
+    cooldown
     scenario_baseline_io
+    cooldown
 
     # CPU-bound × 3 strategie
     scenario_cpu_cpu
+    cooldown
     scenario_cpu_memory
+    cooldown
     scenario_cpu_custom
+    cooldown
 
     # I/O-bound × 3 strategie
     scenario_io_cpu
+    cooldown
     scenario_io_memory
+    cooldown
     scenario_io_custom
 
     ok "Wszystkie 8 scenariuszy zakończonych"
@@ -563,6 +744,9 @@ main() {
             test_quick
             stop_port_forwards
             ;;
+        preflight)
+            test_preflight
+            ;;
         metrics)
             collect_metrics
             ;;
@@ -570,7 +754,7 @@ main() {
             stop_port_forwards
             ;;
         *)
-            echo "Użycie: $0 [all|baseline-cpu|baseline-io|cpu-cpu|cpu-memory|cpu-custom|io-cpu|io-memory|io-custom|quick|metrics|stop]"
+            echo "Użycie: $0 [all|baseline-cpu|baseline-io|cpu-cpu|cpu-memory|cpu-custom|io-cpu|io-memory|io-custom|quick|preflight|metrics|stop]"
             echo ""
             echo "  all          — wszystkie 8 scenariuszy (macierz 2×3, ~48 min)"
             echo "  baseline-cpu — CPU-bound bez HPA (~6 min)"
@@ -582,6 +766,7 @@ main() {
             echo "  io-memory    — I/O-bound + HPA Memory (~6 min)"
             echo "  io-custom    — I/O-bound + HPA Custom RPS (~6 min)"
             echo "  quick        — szybki smoke test (~1 min)"
+            echo "  preflight    — ~5 min pre-flight test z HPA scale-up + Grafana"
             echo "  metrics      — tylko zbieranie metryk Prometheusa"
             echo "  stop         — zatrzymaj port-forwardy"
             exit 1

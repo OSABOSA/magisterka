@@ -62,31 +62,6 @@
       }
     },
     {
-      "id": 3,
-      "title": "Memory Service RPS",
-      "type": "stat",
-      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 4},
-      "targets": [
-        {
-          "expr": "sum(rate(memory_service_http_requests_total[1m]))",
-          "legendFormat": "RPS",
-          "refId": "A"
-        }
-      ],
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "decimals": 2
-        }
-      },
-      "options": {
-        "colorMode": "value",
-        "graphMode": "area",
-        "textMode": "auto"
-      }
-    },
-    {
       "id": 4,
       "title": "CPU Service — CPU Usage (per pod)",
       "type": "timeseries",
@@ -277,88 +252,6 @@
         "defaults": {
           "unit": "s",
           "decimals": 4
-        }
-      }
-    },
-    {
-      "id": 12,
-      "title": "Memory Service — Memory Usage (per pod)",
-      "type": "timeseries",
-      "gridPos": {"x": 0, "y": 36, "w": 12, "h": 8},
-      "targets": [
-        {
-          "expr": "container_memory_working_set_bytes{namespace=\"magisterka\", pod=~\"memory-service-.*\", container=\"memory-service\"}",
-          "legendFormat": "{{pod}}",
-          "refId": "A"
-        }
-      ],
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {
-        "defaults": {
-          "unit": "bytes",
-          "decimals": 1
-        }
-      }
-    },
-    {
-      "id": 13,
-      "title": "Memory Service — Cache Entries",
-      "type": "timeseries",
-      "gridPos": {"x": 12, "y": 36, "w": 12, "h": 8},
-      "targets": [
-        {
-          "expr": "memory_service_cache_entries",
-          "legendFormat": "entries",
-          "refId": "A"
-        }
-      ],
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "decimals": 0
-        }
-      }
-    },
-    {
-      "id": 14,
-      "title": "Memory Service — Cache Size KB",
-      "type": "timeseries",
-      "gridPos": {"x": 0, "y": 44, "w": 12, "h": 8},
-      "targets": [
-        {
-          "expr": "memory_service_cache_size_kb",
-          "legendFormat": "KB",
-          "refId": "A"
-        }
-      ],
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {
-        "defaults": {
-          "unit": "deckbytes",
-          "decimals": 0
-        }
-      }
-    },
-    {
-      "id": 15,
-      "title": "Memory Service — Hit/Miss Ratio",
-      "type": "timeseries",
-      "gridPos": {"x": 12, "y": 44, "w": 12, "h": 8},
-      "targets": [
-        {
-          "expr": "rate(memory_service_cache_hits_total[1m]) / (rate(memory_service_cache_hits_total[1m]) + rate(memory_service_cache_misses_total[1m]))",
-          "legendFormat": "hit ratio",
-          "refId": "A"
-        }
-      ],
-      "datasource": {"type": "prometheus", "uid": "prometheus"},
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "decimals": 4,
-          "max": 1,
-          "min": 0
         }
       }
     },
