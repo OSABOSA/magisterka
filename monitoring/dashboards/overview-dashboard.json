@@ -1,0 +1,431 @@
+{
+  "uid": "magisterka-overview",
+  "title": "Magisterka — System Overview",
+  "tags": ["magisterka", "scalability"],
+  "timezone": "browser",
+  "schemaVersion": 36,
+  "version": 1,
+  "refresh": "10s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "CPU Service RPS",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 0, "w": 8, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(cpu_service_http_requests_total[1m]))",
+          "legendFormat": "RPS",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 2,
+      "title": "IO Service RPS",
+      "type": "stat",
+      "gridPos": {"x": 8, "y": 0, "w": 8, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(io_service_http_requests_total[1m]))",
+          "legendFormat": "RPS",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Memory Service RPS",
+      "type": "stat",
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 4},
+      "targets": [
+        {
+          "expr": "sum(rate(memory_service_http_requests_total[1m]))",
+          "legendFormat": "RPS",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2
+        }
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      }
+    },
+    {
+      "id": 4,
+      "title": "CPU Service — CPU Usage (per pod)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(container_cpu_usage_seconds_total{namespace=\"magisterka\", pod=~\"cpu-service-.*\", container=\"cpu-service\"}[1m])",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpus",
+          "decimals": 3
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "CPU Service — Request Latency p50/p95/p99",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(cpu_service_http_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cpu_service_http_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(cpu_service_http_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 4
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "CPU Service — Throughput RPS",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "sum(rate(cpu_service_http_requests_total[1m])) by (handler, status)",
+          "legendFormat": "{{handler}} ({{status}})",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "CPU Service — Images Processed",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(cpu_service_images_processed_total[1m])",
+          "legendFormat": "images/s",
+          "refId": "A"
+        },
+        {
+          "expr": "cpu_service_images_processed_total",
+          "legendFormat": "total",
+          "refId": "B"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 2
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "IO Service — CPU Usage (per pod)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(container_cpu_usage_seconds_total{namespace=\"magisterka\", pod=~\"io-service-.*\", container=\"io-service\"}[1m])",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "cpus",
+          "decimals": 3
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "IO Service — Request Latency p50/p95/p99",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(io_service_http_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(io_service_http_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(io_service_http_request_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 4
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "IO Service — Concurrent Queries",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "io_service_concurrent_queries",
+          "legendFormat": "concurrent",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "IO Service — Upstream Duration p50/p95/p99",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(io_service_upstream_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(io_service_upstream_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(io_service_upstream_duration_seconds_bucket[1m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 4
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Memory Service — Memory Usage (per pod)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 36, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "container_memory_working_set_bytes{namespace=\"magisterka\", pod=~\"memory-service-.*\", container=\"memory-service\"}",
+          "legendFormat": "{{pod}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 1
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Memory Service — Cache Entries",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 36, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "memory_service_cache_entries",
+          "legendFormat": "entries",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Memory Service — Cache Size KB",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 44, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "memory_service_cache_size_kb",
+          "legendFormat": "KB",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "deckbytes",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "id": 15,
+      "title": "Memory Service — Hit/Miss Ratio",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 44, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(memory_service_cache_hits_total[1m]) / (rate(memory_service_cache_hits_total[1m]) + rate(memory_service_cache_misses_total[1m]))",
+          "legendFormat": "hit ratio",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 4,
+          "max": 1,
+          "min": 0
+        }
+      }
+    },
+    {
+      "id": 16,
+      "title": "Number of Pods per Deployment",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 52, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "kube_deployment_status_replicas_available{namespace=\"magisterka\"}",
+          "legendFormat": "{{deployment}}",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "id": 17,
+      "title": "HPA — Desired vs Current Replicas",
+      "type": "timeseries",
+      "gridPos": {"x": 8, "y": 52, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "kube_hpa_status_desired_replicas{namespace=\"magisterka\"}",
+          "legendFormat": "{{hpa}} desired",
+          "refId": "A"
+        },
+        {
+          "expr": "kube_hpa_status_current_replicas{namespace=\"magisterka\"}",
+          "legendFormat": "{{hpa}} current",
+          "refId": "B"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      }
+    },
+    {
+      "id": 18,
+      "title": "Scaling Events Timeline",
+      "type": "timeseries",
+      "gridPos": {"x": 16, "y": 52, "w": 8, "h": 8},
+      "targets": [
+        {
+          "expr": "changes(kube_deployment_status_replicas_available{namespace=\"magisterka\"}[5m])",
+          "legendFormat": "{{deployment}} replica change",
+          "refId": "A"
+        }
+      ],
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0
+        }
+      }
+    }
+  ]
+}

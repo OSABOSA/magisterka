@@ -1,0 +1,41 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: magisterka
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+
+    scrape_configs:
+      - job_name: 'cpu-service'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [magisterka]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: cpu-service
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: "8000"
+
+      - job_name: 'io-service'
+        kubernetes_sd_configs:
+          - role: pod
+            namespaces:
+              names: [magisterka]
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: io-service
+          - source_labels: [__meta_kubernetes_pod_container_port_number]
+            action: keep
+            regex: "8000"
+
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']

@@ -1,0 +1,40 @@
+services:
+  cpu-service:
+    build: ./apps/cpu-service/
+    user: "1000:100"
+    restart: unless-stopped
+    networks:
+      - infra_network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.cpu-service.rule=Host(`cpu-magisterka.${DOMAIN}`)"
+      - "traefik.http.routers.cpu-service.entrypoints=web"
+      - "traefik.http.services.cpu-service.loadbalancer.server.port=8000"
+      - "tsdproxy.enable=true"
+      - "tsdproxy.name=cpu-service"
+      - "tsdproxy.target=traefik"
+      - "tsdproxy.container_port=80"
+    volumes:
+      - ./apps/cpu-service:/app
+
+  io-service:
+    build: ./apps/io-service/
+    user: "1000:100"
+    restart: unless-stopped
+    networks:
+      - infra_network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.io-service.rule=Host(`io-magisterka.${DOMAIN}`)"
+      - "traefik.http.routers.io-service.entrypoints=web"
+      - "traefik.http.services.io-service.loadbalancer.server.port=8000"
+      - "tsdproxy.enable=true"
+      - "tsdproxy.name=io-service"
+      - "tsdproxy.target=traefik"
+      - "tsdproxy.container_port=80"
+    volumes:
+      - ./apps/io-service:/app
+
+networks:
+  infra_network:
+    external: true
