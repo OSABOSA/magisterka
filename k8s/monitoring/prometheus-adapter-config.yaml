@@ -9,9 +9,6 @@ metadata:
 data:
   config.yaml: |
     rules:
-      default: false
-
-      # --- CPU-service custom metrics ---
       - seriesQuery: 'cpu_service_http_requests_total{namespace!="",pod!=""}'
         resources:
           overrides:
@@ -21,7 +18,6 @@ data:
           matches: "cpu_service_http_requests_total"
           as: "http_requests_per_second"
         metricsQuery: 'sum(rate(cpu_service_http_requests_total{<<.LabelMatchers>>}[1m])) by (<<.GroupBy>>)'
-
       - seriesQuery: 'cpu_service_http_requests_inprogress{namespace!="",pod!=""}'
         resources:
           overrides:
@@ -31,8 +27,6 @@ data:
           matches: "cpu_service_http_requests_inprogress"
           as: "http_requests_inflight"
         metricsQuery: 'sum(cpu_service_http_requests_inprogress{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
-
-      # --- IO-service custom metrics ---
       - seriesQuery: 'io_service_http_requests_total{namespace!="",pod!=""}'
         resources:
           overrides:
@@ -42,7 +36,6 @@ data:
           matches: "io_service_http_requests_total"
           as: "http_requests_per_second"
         metricsQuery: 'sum(rate(io_service_http_requests_total{<<.LabelMatchers>>}[1m])) by (<<.GroupBy>>)'
-
       - seriesQuery: 'io_service_http_requests_inprogress{namespace!="",pod!=""}'
         resources:
           overrides:
@@ -52,8 +45,6 @@ data:
           matches: "io_service_http_requests_inprogress"
           as: "http_requests_inflight"
         metricsQuery: 'sum(io_service_http_requests_inprogress{<<.LabelMatchers>>}) by (<<.GroupBy>>)'
-
-      # --- Resource metrics (passthrough to metrics-server) ---
       - seriesQuery: '{__name__=~"^container_.*",namespace!="",pod!=""}'
         resources:
           overrides:

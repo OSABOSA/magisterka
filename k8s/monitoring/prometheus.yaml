@@ -20,7 +20,7 @@ spec:
       serviceAccountName: prometheus
       containers:
         - name: prometheus
-          image: prometheus/prometheus:latest
+          image: quay.io/prometheus/prometheus:v2.45.0
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 9090

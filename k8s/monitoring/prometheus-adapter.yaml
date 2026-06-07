@@ -17,6 +17,8 @@ spec:
         app: prometheus-adapter
         tier: monitoring
     spec:
+      nodeSelector:
+        workload: system
       serviceAccountName: prometheus-adapter
       containers:
         - name: prometheus-adapter
@@ -25,9 +27,10 @@ spec:
           args:
             - --config=/etc/adapter/config.yaml
             - --metrics-relist-interval=30s
-            - --prometheus-url=http://prometheus.magisterka.svc.cluster.local:9090
-            - --logtostderr=true
+            - --prometheus-url=http://prometheus:9090
             - --v=4
+            # --- POPRAWKA: Przeniesienie generowania certyfikatów do zapisu w /tmp ---
+            - --cert-dir=/tmp
           ports:
             - containerPort: 443
               name: https
@@ -47,14 +50,14 @@ spec:
               path: /healthz
               port: 443
               scheme: HTTPS
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 15
           readinessProbe:
             httpGet:
               path: /healthz
               port: 443
               scheme: HTTPS
-            initialDelaySeconds: 10
+            initialDelaySeconds: 15
             periodSeconds: 15
       volumes:
         - name: config
@@ -70,7 +73,6 @@ metadata:
     app: prometheus-adapter
     tier: monitoring
 spec:
-  type: ClusterIP
   selector:
     app: prometheus-adapter
   ports:
