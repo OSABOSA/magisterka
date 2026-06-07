@@ -1,0 +1,113 @@
+% =============================================================================
+% Rozdział 7: Podsumowanie
+% =============================================================================
+\chapter{Podsumowanie}
+
+\section{Podsumowanie zrealizowanych prac}
+
+W ramach niniejszej pracy magisterskiej zrealizowano następujące cele:
+
+\begin{enumerate}
+  \item \textbf{Analiza literatury} — przeprowadzono przegląd istniejących badań nad autoskalowaniem w \textit{Kubernetes}, identyfikując cztery kluczowe luki badawcze: brak systematycznego porównania strategii HPA dla różnych profili obciążeniowych, ograniczoną analizę HPA Memory, brak badań łączących HPA z modelem \textit{SaaS} oraz brak otwartego, odtwarzalnego środowiska badawczego.
+  
+  \item \textbf{Zaprojektowanie architektury} — zaprojektowano system badawczy oparty na macierzy $2 \times 3$ (dwa profile obciążeniowe $\times$ trzy strategie HPA), składający się z czterech mikroserwisów (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}, \texttt{memory-service}), infrastruktury monitorującej (\textit{Prometheus}, \textit{Grafana}, \textit{Prometheus Adapter}) oraz zestawu skryptów automatyzujących.
+  
+  \item \textbf{Implementacja} — zaimplementowano kompletny system badawczy w języku Python 3.12 z frameworkiem \textit{FastAPI}, konteneryzowany za pomocą \textit{Docker} i wdrażany na klastrze \textit{k3s}. Wszystkie manifesty \textit{Kubernetes} (Deploymenty, Serwisy, HPA, Ingress) oraz konfiguracje monitoringu są dostępne w repozytorium.
+  
+  \item \textbf{Automatyzacja testów} — opracowano skrypt \texttt{run-tests.sh} orkiestrujący wykonanie 8 scenariuszy testowych z 5-krotnym powtórzeniem każdego, z automatycznym przełączaniem HPA, resetowaniem \textit{Deploymentów} i cooldownem między scenariuszami.
+  
+  \item \textbf{Scenariusze obciążeniowe} — zdefiniowano trzy skrypty \textit{k6} (\texttt{cpu-load-test.js}, \texttt{io-load-test.js}, \texttt{combined-scenario.js}) z precyzyjnymi progami akceptacji i profilami obciążenia dopasowanymi do charakterystyki aplikacji.
+\end{enumerate}
+
+\section{Weryfikacja hipotezy badawczej}
+
+% TODO: uzupełnić po zakończeniu badań eksperymentalnych
+
+Hipoteza badawcza postawiona w Rozdziale 1 brzmiała:
+
+\begin{quote}
+\textit{,,Nie istnieje jedna uniwersalna metryka HPA — skuteczność strategii skalowania zależy od charakterystyki obciążeniowej aplikacji (\textit{workload profile}). Błędny wybór metryki prowadzi do niedoskalowania lub przeskalowania.''}
+\end{quote}
+
+Na obecnym etapie prac (czerwiec 2026) badania eksperymentalne nie zostały jeszcze przeprowadzone, w związku z czym hipoteza nie może zostać formalnie zweryfikowana. Poniżej przedstawiono oczekiwane rezultaty oparte na analizie teoretycznej i charakterystyce zaimplementowanych aplikacji:
+
+\begin{itemize}
+  \item \textbf{HPA CPU} — oczekuje się, że będzie skuteczne wyłącznie dla \texttt{cpu-service}, gdzie zużycie procesora silnie koreluje z liczbą żądań (operacje \textit{Pillow}, rekurencyjny Fibonacci). Dla \texttt{io-service}, gdzie procesor jest bezczynny podczas \texttt{asyncio.sleep()}, HPA CPU nie powinno reagować na wzrost ruchu.
+  
+  \item \textbf{HPA Memory} — oczekuje się, że będzie nieskuteczne dla obu serwisów, ponieważ ani \texttt{cpu-service}, ani \texttt{io-service} nie alokują pamięci dynamicznie w odpowiedzi na obciążenie. Pamięć jest alokowana statycznie przy starcie i utrzymuje stały poziom.
+  
+  \item \textbf{HPA Custom RPS} — oczekuje się, że będzie uniwersalnie skuteczne, ponieważ liczba żądań na sekundę rośnie proporcjonalnie do obciążenia niezależnie od tego, czy żądania są CPU-intensywne, czy I/O-intensywne.
+\end{itemize}
+
+\section{Ograniczenia pracy}
+
+Należy wskazać następujące ograniczenia niniejszej pracy:
+
+\begin{itemize}
+  \item \textbf{Brak wyników eksperymentalnych} — na obecnym etapie zaimplementowano kompletny system badawczy i narzędzia do testów, ale same badania nie zostały jeszcze przeprowadzone. Wnioski przedstawione w Rozdziale 5 mają charakter oczekiwany i wymagają walidacji empirycznej.
+  
+  \item \textbf{Pojedynczy węzeł k3s} — lokalne środowisko testowe działa na pojedynczym serwerze QNAP, co oznacza, że wszystkie Pody są uruchamiane na tym samym węźle. W środowisku wielowęzłowym efekty związane z rozkładem obciążenia między węzłami mogłyby wpłynąć na wyniki.
+  
+  \item \textbf{Sztuczny charakter obciążenia} — aplikacje badawcze (\texttt{cpu-service}, \texttt{io-service}) symulują określone profile obciążeniowe, ale nie odzwierciedlają rzeczywistych aplikacji produkcyjnych. Rzeczywiste systemy często wykazują mieszane profile (\textit{CPU-bound} + \textit{I/O-bound}).
+  
+  \item \textbf{Ograniczony zakres HPA} — badanie ogranicza się do trzech metryk HPA (\textit{CPU}, \textit{Memory}, \textit{Custom RPS}). Nie analizowano innych strategii, takich jak HPA na podstawie liczby żądań w toku (\textit{in-flight}), metryk zewnętrznych (\textit{External Metrics}) ani skalowania predykcyjnego.
+  
+  \item \textbf{Brak implementacji \textit{multi-tenancy}} — rozszerzenie \textit{SaaS Multi-Tenancy} (Faza VIII) zostało zaprojektowane koncepcyjnie, ale nie zaimplementowane w kodzie. Wnioski dotyczące zachowania systemu w środowisku wielodostępnym pozostają hipotetyczne.
+  
+  \item \textbf{Ograniczenia sprzętowe} — serwer QNAP TS-464 z 8\,GB RAM ogranicza skalę eksperymentów. Przy \texttt{maxReplicas=10} dla obu serwisów plus monitoring, dostępna pamięć może być niewystarczająca.
+\end{itemize}
+
+\section{Rekomendacje praktyczne}
+
+Na podstawie analizy teoretycznej i projektu systemu sformułowano następujące rekomendacje dla praktyków:
+
+\begin{enumerate}
+  \item \textbf{Dobieraj metrykę HPA do profilu aplikacji} — przed wyborem strategii autoskalowania należy scharakteryzować aplikację pod kątem profilu obciążeniowego (\textit{CPU-bound}, \textit{I/O-bound}, \textit{memory-bound}). Domyślna strategia HPA CPU może być nieskuteczna dla aplikacji I/O-bound.
+  
+  \item \textbf{Używaj HPA Custom RPS jako strategii uniwersalnej} — jeśli charakterystyka aplikacji jest nieznana lub zmienna, metryka RPS (dostarczana przez \textit{prometheus-adapter}) jest bezpiecznym wyborem, ponieważ koreluje z obciążeniem niezależnie od profilu.
+  
+  \item \textbf{Unikaj HPA Memory jako jedynej metryki} — chyba że aplikacja wykazuje silną korelację między obciążeniem a zużyciem pamięci (np. cache, kolejki), HPA Memory prawdopodobnie nie będzie skuteczne.
+  
+  \item \textbf{Testuj w środowisku odzwierciedlającym produkcję} — wnioski z testów na pojedynczym węźle k3s niekoniecznie przenoszą się na środowisko wielowęzłowe lub chmurowe. Rekomenduje się walidację wyników na GKE lub innym klastrze produkcyjnym.
+  
+  \item \textbf{Automatyzuj testy porównawcze} — ręczne przełączanie HPA i uruchamianie testów jest podatne na błędy. Skrypt \texttt{run-tests.sh} opracowany w ramach niniejszej pracy może służyć jako wzorzec do automatyzacji podobnych badań.
+\end{enumerate}
+
+\section{Dalsze kierunki badań}
+
+Niniejsza praca otwiera następujące kierunki dalszych badań:
+
+\begin{enumerate}
+  \item \textbf{Przeprowadzenie badań eksperymentalnych} — najpilniejszym kolejnym krokiem jest wykonanie 8 scenariuszy testowych na klastrze k3s i zebranie danych empirycznych do weryfikacji hipotezy.
+  
+  \item \textbf{Wdrożenie na GKE} — powtórzenie eksperymentów na zarządzanym klastrze \textit{Google Kubernetes Engine} w celu zweryfikowania, czy wyniki uzyskane lokalnie są odtwarzalne w środowisku chmurowym.
+  
+  \item \textbf{Implementacja \textit{multi-tenancy}} — zrealizowanie Fazy VIII zgodnie z koncepcją opisaną w Rozdziale 6 i przeprowadzenie testów w środowisku wielodostępnym.
+  
+  \item \textbf{Rozszerzenie macierzy badawczej} — dodanie \texttt{memory-service} jako trzeciego profilu obciążeniowego (\textit{memory-bound}) i zbadanie, czy HPA Memory staje się skuteczne dla aplikacji, których zużycie pamięci koreluje z obciążeniem.
+  
+  \item \textbf{Badanie innych metryk HPA} — analiza skuteczności metryk takich jak liczba żądań w toku (\texttt{http\_requests\_inflight}), metryk zewnętrznych (długość kolejki \textit{RabbitMQ}, liczba wiadomości \textit{Kafka}) oraz kombinacji wielu metryk w jednym HPA.
+  
+  \item \textbf{Skalowanie predykcyjne} — porównanie reaktywnego HPA z podejściami predykcyjnymi (np. opartymi na LSTM), które przewidują przyszłe obciążenie i skalują proaktywnie.
+  
+  \item \textbf{Analiza kosztowa} — rozszerzenie badań o analizę kosztów infrastruktury w modelu \textit{pay-as-you-go} dla różnych strategii HPA, szczególnie w kontekście \textit{multi-tenancy}, gdzie przeskalowanie przekłada się bezpośrednio na wyższe koszty.
+  
+  \item \textbf{Testy z rzeczywistymi aplikacjami} — zastąpienie syntetycznych serwisów badawczych rzeczywistymi aplikacjami (np. system rezerwacji, przetwarzanie obrazu w pipeline ML) w celu walidacji uniwersalności wniosków.
+\end{enumerate}
+
+\section{Podsumowanie końcowe}
+
+Niniejsza praca magisterska stanowi kompleksowe przygotowanie do badań empirycznych nad skutecznością strategii \textit{HorizontalPodAutoscaler} w \textit{Kubernetes} dla różnych profili obciążeniowych. Zaimplementowano w pełni funkcjonalny system badawczy składający się z mikroserwisów, infrastruktury monitorującej i skryptów automatyzujących, gotowy do przeprowadzenia eksperymentów.
+
+Główny wkład pracy obejmuje:
+
+\begin{itemize}
+  \item Systematyczną analizę literatury identyfikującą luki badawcze w dziedzinie autoskalowania w \textit{Kubernetes}.
+  \item Projekt macierzy badawczej $2 \times 3$ umożliwiającej izolowane porównanie strategii HPA.
+  \item Implementację czterech mikroserwisów o kontrolowanych profilach obciążeniowych (\textit{CPU-bound}, \textit{I/O-bound}, \textit{memory-bound}).
+  \item Konfigurację infrastruktury monitorującej z niestandardowymi metrykami przez \textit{prometheus-adapter}.
+  \item Pełną automatyzację procesu badawczego — od wdrożenia po wykonanie testów.
+  \item Otwarte, odtwarzalne środowisko badawcze dostępne w repozytorium.
+\end{itemize}
+
+Przeprowadzenie zaplanowanych badań eksperymentalnych i weryfikacja hipotezy badawczej stanowią bezpośredni kolejny krok, do którego niniejsza praca dostarcza wszystkich niezbędnych narzędzi.

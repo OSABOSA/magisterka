@@ -1,0 +1,161 @@
+% =============================================================================
+% Rozdział 1: Wstęp teoretyczny
+% =============================================================================
+\chapter{Wstęp teoretyczny}
+
+\section{Motywacja i kontekst badawczy}
+
+Współczesne systemy informatyczne funkcjonują w środowisku charakteryzującym się zmiennym obciążeniem, rosnącymi oczekiwaniami użytkowników dotyczącymi czasu odpowiedzi oraz koniecznością efektywnego wykorzystania zasobów sprzętowych. Model \textit{SaaS} (\textit{Software as a Service}) narzuca dodatkowe wymagania związane z obsługą wielu klientów (\textit{tenantów}) współdzielących tę samą infrastrukturę przy zachowaniu izolacji danych i przewidywalnej wydajności.
+
+Kluczowym mechanizmem umożliwiającym sprostanie tym wymaganiom jest automatyczne skalowanie (\textit{autoscaling}) — zdolność systemu do dynamicznego dostosowywania liczby jednostek obliczeniowych do bieżącego obciążenia bez interwencji operatora. W ekosystemie \textit{Kubernetes} podstawowym narzędziem realizującym skalowanie poziome jest \textit{HorizontalPodAutoscaler} (HPA), który na podstawie obserwowanych metryk podejmuje decyzje o dodaniu lub usunięciu replik aplikacji.
+
+\section{Problem badawczy i hipoteza}
+
+Skuteczność mechanizmu HPA zależy od wyboru metryki, na podstawie której podejmowana jest decyzja o skalowaniu. Metryka musi być skorelowana z rzeczywistym obciążeniem aplikacji — w przeciwnym razie system może nie skalować się w ogóle (niedoskalowanie, \textit{underscaling}) lub skalować się nadmiernie (przeskalowanie, \textit{overscaling}). Problem ten jest szczególnie istotny w architekturach \textit{SaaS}, gdzie różni tenantci generują obciążenia o odmiennych charakterystykach.
+
+\textbf{Hipoteza badawcza:} Nie istnieje jedna uniwersalna metryka HPA — skuteczność strategii skalowania zależy od charakterystyki obciążeniowej aplikacji (\textit{workload profile}). Błędny wybór metryki prowadzi do niedoskalowania lub przeskalowania.
+
+\section{Cel i zakres pracy}
+
+Celem niniejszej pracy jest:
+
+\begin{enumerate}
+  \item Zaprojektowanie i implementacja prototypu skalowalnego systemu w modelu \textit{SaaS}, składającego się z mikroserwisów o diametralnie różnych profilach obciążeniowych (\textit{CPU-bound} oraz \textit{I/O-bound}).
+  \item Przeprowadzenie kontrolowanych eksperymentów porównujących trzy strategie HPA: opartą na zużyciu CPU, opartą na zużyciu pamięci oraz opartą na niestandardowej metryce RPS (\textit{Requests Per Second}) dostarczanej przez \textit{prometheus-adapter}.
+  \item Analiza porównawcza efektywności strategii skalowania w macierzy badawczej $2 \times 3$ (dwa typy obciążenia $\times$ trzy strategie HPA).
+  \item Sformułowanie rekomendacji dotyczących doboru metryki HPA w zależności od charakterystyki aplikacji.
+\end{enumerate}
+
+\section{Architektury skalowalne systemów}
+
+\subsection{Monolit, SOA i mikroserwisy}
+
+Ewolucja architektur systemów rozproszonych przebiegała od monolitycznych aplikacji, przez architekturę zorientowaną na usługi (\textit{SOA}), do współczesnego paradygmatu mikroserwisów. Każde z tych podejść oferuje inny kompromis między złożonością zarządzania a elastycznością skalowania:
+
+\begin{itemize}
+  \item \textbf{Monolit} — cała funkcjonalność systemu zawarta w jednej jednostce wdrożeniowej. Skalowanie odbywa się przez uruchomienie wielu instancji całej aplikacji, co jest nieefektywne, gdy tylko wybrane komponenty wymagają większej mocy obliczeniowej.
+  \item \textbf{SOA} (\textit{Service-Oriented Architecture}) — system podzielony na usługi komunikujące się przez \textit{Enterprise Service Bus} (ESB). Umożliwia selektywne skalowanie, ale wprowadza złożoność infrastrukturalną i potencjalne wąskie gardła w warstwie integracyjnej.
+  \item \textbf{Mikroserwisy} — każda funkcja biznesowa jest niezależną jednostką wdrożeniową z własnym cyklem życia, stosem technologicznym i polityką skalowania. Model ten umożliwia precyzyjne skalowanie tylko tych komponentów, które są przeciążone, co maksymalizuje efektywność wykorzystania zasobów.
+\end{itemize}
+
+\subsection{Wzorce skalowania}
+
+Skalowanie systemów informatycznych można realizować w trzech podstawowych wymiarach:
+
+\begin{itemize}
+  \item \textbf{Skalowanie pionowe} (\textit{vertical scaling}) — zwiększanie zasobów pojedynczej instancji (więcej CPU, RAM). Ograniczone fizycznymi możliwościami sprzętu; nie zwiększa odporności na awarie.
+  \item \textbf{Skalowanie poziome} (\textit{horizontal scaling}) — zwiększanie liczby instancji obsługujących ruch. Umożliwia rozłożenie obciążenia, zwiększa odporność na awarie, ale wymaga mechanizmów równoważenia obciążenia i koordynacji stanu.
+  \item \textbf{Skalowanie automatyczne} (\textit{autoscaling}) — dynamiczne dostosowywanie liczby instancji na podstawie obserwowanych metryk, bez interwencji operatora. Jest to kluczowy mechanizm w systemach chmurowych, gdzie koszty są proporcjonalne do wykorzystania zasobów.
+\end{itemize}
+
+\section{Platformy orkiestracji kontenerów}
+
+\subsection{Kubernetes — architektura i kluczowe komponenty}
+
+\textit{Kubernetes} (K8s) jest otwartą platformą do automatyzacji wdrażania, skalowania i zarządzania aplikacjami kontenerowymi, pierwotnie opracowaną przez Google i obecnie utrzymywaną przez \textit{Cloud Native Computing Foundation} (CNCF).
+
+Architektura \textit{Kubernetes} opiera się na klastrze składającym się z:
+
+\begin{itemize}
+  \item \textbf{Control Plane} — warstwa sterowania obejmująca \textit{API server}, \textit{etcd} (magazyn stanu), \textit{scheduler} (przydzielanie Podów do węzłów) oraz \textit{controller manager} (w tym \textit{HorizontalPodAutoscaler}).
+  \item \textbf{Worker Nodes} — węzły wykonawcze, na których uruchamiane są Pody za pośrednictwem \textit{kubelet} i \textit{container runtime} (np. \textit{containerd}).
+\end{itemize}
+
+Podstawową jednostką obliczeniową w \textit{Kubernetes} jest \textbf{Pod} — grupa jednego lub więcej kontenerów współdzielących przestrzeń sieciową i woluminy. Pody są efemeryczne — mogą być tworzone, niszczone i przenoszone między węzłami.
+
+\subsection{k3s — lekka dystrybucja Kubernetes}
+
+\textit{k3s} jest certyfikowaną dystrybucją \textit{Kubernetes} zoptymalizowaną pod kątem środowisk o ograniczonych zasobach (IoT, \textit{edge computing}, laboratoria). W porównaniu do standardowego \textit{Kubernetes}, \textit{k3s}:
+
+\begin{itemize}
+  \item Pakuje wszystkie komponenty \textit{Control Plane} w pojedynczy binarny plik wykonywalny.
+  \item Zastępuje \textit{etcd} lekką bazą SQLite (domyślnie) lub osadzonym \textit{etcd}.
+  \item Usuwa nieużywane w mniejszych środowiskach kontrolery i \textit{admission plugins}.
+  \item Używa \textit{containerd} jako domyślnego \textit{container runtime}.
+\end{itemize}
+
+W niniejszej pracy \textit{k3s} został wybrany jako platforma dla lokalnego środowiska badawczego ze względu na niskie wymagania sprzętowe i prostotę instalacji.
+
+\section{Mechanizmy autoskalowania w Kubernetes}
+
+\subsection{HorizontalPodAutoscaler (HPA)}
+
+\textit{HorizontalPodAutoscaler} jest kontrolerem \textit{Kubernetes}, który automatycznie dostosowuje liczbę replik w \textit{Deployment}, \textit{ReplicaSet} lub \textit{StatefulSet} na podstawie obserwowanych metryk. Algorytm HPA działa według formuły:
+
+\begin{equation}
+  \text{desiredReplicas} = \left\lceil \text{currentReplicas} \times \frac{\text{currentMetricValue}}{\text{desiredMetricValue}} \right\rceil
+\end{equation}
+
+HPA w wersji API \texttt{autoscaling/v2} obsługuje trzy typy metryk:
+
+\begin{enumerate}
+  \item \textbf{Resource metrics} — metryki zasobów kontenera (CPU, pamięć) dostarczane przez \textit{metrics-server}.
+  \item \textbf{Pods metrics} — metryki niestandardowe skojarzone z konkretnymi Podami, dostarczane przez zewnętrzne adaptery (np. \textit{prometheus-adapter}).
+  \item \textbf{Object metrics} — metryki opisujące obiekty \textit{Kubernetes} (np. \textit{Ingress}), również dostarczane przez adaptery.
+\end{enumerate}
+
+\subsection{VerticalPodAutoscaler (VPA)}
+
+\textit{VerticalPodAutoscaler} (VPA) automatycznie dostosowuje \textit{resource requests} i \textit{limits} dla kontenerów w Podzie. W przeciwieństwie do HPA, który zmienia liczbę replik, VPA zmienia ilość zasobów przydzielonych każdej replice. VPA nie jest przedmiotem badań w niniejszej pracy, ale stanowi uzupełniający mechanizm skalowania.
+
+\subsection{KEDA}
+
+\textit{KEDA} (\textit{Kubernetes Event-Driven Autoscaling}) jest komponentem umożliwiającym skalowanie na podstawie zdarzeń z zewnętrznych systemów (np. długość kolejki \textit{Apache Kafka}, liczba wiadomości w \textit{RabbitMQ}). \textit{KEDA} rozszerza możliwości HPA o skalowanie do zera replik oraz integrację z bogatym ekosystemem \textit{scalerów}. KEDA nie jest przedmiotem badań w niniejszej pracy, ale stanowi istotny kierunek dalszych prac.
+
+\section{Modele SaaS i multi-tenancy}
+
+\subsection{Software as a Service (SaaS)}
+
+Model \textit{SaaS} jest jedną z trzech podstawowych kategorii \textit{cloud computing} (obok \textit{IaaS} i \textit{PaaS}), w której dostawca udostępnia użytkownikom gotową aplikację przez Internet, zarządzając całą infrastrukturą, środowiskiem uruchomieniowym i danymi. Kluczowe cechy modelu \textit{SaaS} to:
+
+\begin{itemize}
+  \item \textbf{Współdzielenie infrastruktury} — wielu klientów (\textit{tenantów}) korzysta z tej samej instancji aplikacji i infrastruktury.
+  \item \textbf{Izolacja danych} — dane każdego tenanta muszą być logicznie odseparowane.
+  \item \textbf{Skalowalność} — system musi obsługiwać zmienne obciążenie od wielu tenantów jednocześnie.
+  \item \textbf{Rozliczanie} — model subskrypcyjny (miesięczny/roczny) lub \textit{pay-as-you-go}.
+\end{itemize}
+
+\subsection{Multi-tenancy}
+
+\textit{Multi-tenancy} (wielodostępność) jest architektonicznym wzorcem umożliwiającym obsługę wielu klientów przez pojedynczą instancję systemu. W kontekście \textit{Kubernetes} można wyróżnić kilka poziomów izolacji:
+
+\begin{itemize}
+  \item \textbf{Namespace per tenant} — każdy tenant otrzymuje własny \textit{namespace} z izolowanymi zasobami (\textit{ResourceQuota}, \textit{NetworkPolicy}).
+  \item \textbf{Application-level multi-tenancy} — tenanci są rozróżniani na poziomie aplikacji (np. przez nagłówek \texttt{X-Tenant-ID}), współdzieląc ten sam \textit{namespace}.
+  \item \textbf{Cluster per tenant} — każdy tenant otrzymuje dedykowany klaster, co zapewnia najwyższy poziom izolacji przy najwyższym koszcie.
+\end{itemize}
+
+\section{Przegląd literatury i istniejących badań}
+
+Problematyka autoskalowania w \textit{Kubernetes} była przedmiotem licznych badań w ostatnich latach. Poniżej przedstawiono najważniejsze kierunki badawcze i luki, które motywują niniejszą pracę.
+
+\subsection{Badania nad HPA w Kubernetes}
+
+Casalicchio i Perciballi \cite{huawei2021} przeprowadzili analizę porównawczą domyślnego HPA \textit{Kubernetes} z \textit{Kubernetes Event-Driven Autoscaling} (KEDA), badając czas reakcji i wykorzystanie zasobów dla obciążeń o różnych profilach. Autorzy wykazali, że KEDA oferuje szybszy czas skalowania przy obciążeniach zdarzeniowych, ale domyślny HPA jest wystarczający dla obciążeń o stałym charakterze.
+
+Nguyen i Kim \cite{nguyen2020} zaproponowali predykcyjny algorytm skalowania oparty na sieciach LSTM (\textit{Long Short-Term Memory}), który przewiduje przyszłe obciążenie i skaluje proaktywnie, redukując liczbę naruszeń SLA o 30\% w porównaniu do reaktywnego HPA. Podejście to wymaga jednak znacznych zasobów obliczeniowych na trenowanie modelu.
+
+\subsection{Luki badawcze}
+
+Na podstawie przeglądu literatury zidentyfikowano następujące luki badawcze:
+
+\begin{enumerate}
+  \item \textbf{Brak systematycznego porównania strategii HPA dla różnych profili obciążeniowych} — większość badań testuje HPA na jednorodnym obciążeniu (np. wyłącznie CPU-bound), nie analizując interakcji między profilem obciążeniowym a wyborem metryki.
+  \item \textbf{Ograniczona analiza HPA Memory} — strategia oparta na zużyciu pamięci jest rzadko badana, ponieważ pamięć w większości aplikacji nie koreluje z obciążeniem — niniejsza praca dostarcza empirycznych dowodów na tę tezę.
+  \item \textbf{Brak badań łączących HPA z modelem SaaS} — istniejące badania nad \textit{multi-tenancy} koncentrują się na izolacji danych i bezpieczeństwie, pomijając wpływ wielodostępności na efektywność autoskalowania.
+  \item \textbf{Brak otwartego, odtwarzalnego środowiska badawczego} — większość eksperymentów jest trudna do odtworzenia ze względu na zamknięty kod lub specyficzne dla dostawcy chmury konfiguracje. Niniejsza praca udostępnia kompletne repozytorium kodu, konfiguracji i skryptów.
+\end{enumerate}
+
+\section{Struktura pracy}
+
+Praca składa się z siedmiu rozdziałów:
+
+\begin{itemize}
+  \item \textbf{Rozdział 1} (niniejszy) — wprowadzenie teoretyczne, motywacja, hipoteza badawcza, przegląd literatury.
+  \item \textbf{Rozdział 2} — szczegółowy przegląd technologii wykorzystanych w projekcie: \textit{Kubernetes}, \textit{k3s}, \textit{Prometheus}, \textit{Grafana}, \textit{k6}, \textit{Docker}, \textit{Traefik}, \textit{GKE}.
+  \item \textbf{Rozdział 3} — projekt architektury systemu badawczego: macierz badawcza, specyfikacja aplikacji, strategie HPA, infrastruktura monitorująca, plan eksperymentów.
+  \item \textbf{Rozdział 4} — implementacja: struktura kodu, implementacja serwisów, konfiguracja \textit{Kubernetes}, monitoring, skrypty automatyzujące, scenariusze testowe.
+  \item \textbf{Rozdział 5} — badania eksperymentalne i analiza wyników: metodyka, scenariusze testowe, wyniki, interpretacja, porównanie strategii.
+  \item \textbf{Rozdział 6} — rozszerzenie \textit{SaaS Multi-Tenancy}: koncepcja, implementacja izolacji tenantów, testy wielodostępne, wyniki i analiza.
+  \item \textbf{Rozdział 7} — podsumowanie, wnioski, rekomendacje, ograniczenia badań i dalsze kierunki prac.
+\end{itemize}

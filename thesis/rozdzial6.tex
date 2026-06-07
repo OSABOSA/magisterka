@@ -1,0 +1,67 @@
+% =============================================================================
+% Rozdział 6: Rozszerzenie SaaS Multi-Tenancy
+% =============================================================================
+\chapter{Rozszerzenie \textit{SaaS Multi-Tenancy}}
+
+\section{Status implementacji}
+
+Zgodnie z planem pracy (Faza VIII), rozszerzenie systemu o model \textit{SaaS Multi-Tenancy} zostało zaplanowane jako końcowy etap projektu. Na obecnym etapie prac (stan na czerwiec 2026) funkcjonalność \textit{multi-tenancy} \textbf{nie została zaimplementowana} w kodzie źródłowym. W repozytorium nie występują nagłówki \texttt{X-Tenant-ID}, mechanizmy izolacji danych między tenantami ani konfiguracje \textit{namespace-per-tenant}.
+
+Niniejszy rozdział przedstawia zaprojektowaną koncepcję rozszerzenia \textit{SaaS}, która stanowi podstawę do przyszłej implementacji.
+
+\section{Koncepcja \textit{Multi-Tenancy} w systemie badawczym}
+
+\subsection{Model izolacji tenantów}
+
+Zaprojektowano dwa poziomy izolacji tenantów — lekki (\textit{application-level}) i pełny (\textit{namespace-per-tenant}):
+
+\begin{enumerate}
+  \item \textbf{Application-level multi-tenancy} — tenanci są rozróżniani na poziomie aplikacji przez nagłówek \texttt{X-Tenant-ID}. Wszyscy tenanci współdzielą ten sam \textit{Deployment} i \textit{namespace}. Izolacja dotyczy wyłącznie danych (np. klucze cache w \texttt{memory-service} są prefiksowane identyfikatorem tenanta), natomiast zasoby obliczeniowe są współdzielone. Ten poziom jest najprostszy w implementacji i najbardziej ekonomiczny, ale nie zapewnia izolacji wydajnościowej.
+
+  \item \textbf{Namespace-per-tenant} — każdy tenant otrzymuje dedykowany \textit{namespace} z własnymi \textit{Deploymentami}, \textit{HPA}, \textit{ResourceQuota} i \textit{NetworkPolicy}. Zapewnia to pełną izolację zasobów i wydajności, ale zwiększa koszt infrastrukturalny proporcjonalnie do liczby tenantów.
+\end{enumerate}
+
+\subsection{Projektowana architektura}
+
+W modelu \textit{application-level multi-tenancy}:
+
+\begin{itemize}
+  \item \textbf{Nagłówek \texttt{X-Tenant-ID}} — każdy mikroserwis odczytuje identyfikator tenanta z nagłówka HTTP. W przypadku jego braku, żądanie jest odrzucane z kodem 400.
+  \item \textbf{Izolacja danych} — \texttt{memory-service} używa prefiksów kluczy (\texttt{<tenant\_id>:<key>}), zapewniając logiczną separację danych w obrębie jednego \textit{in-memory cache}.
+  \item \textbf{Metryki per tenant} — \textit{Prometheus} zbiera metryki z etykietą \texttt{tenant\_id}, umożliwiając analizę wydajności w podziale na tenantów.
+  \item \textbf{HPA z etykietami} — \textit{HorizontalPodAutoscaler} uwzględnia obciążenie od wszystkich tenantów łącznie, co odzwierciedla realistyczny scenariusz SaaS, gdzie infrastruktura jest współdzielona.
+\end{itemize}
+
+W modelu \textit{namespace-per-tenant}:
+
+\begin{itemize}
+  \item Każdy tenant ma własny \textit{namespace} (np. \texttt{tenant-001}, \texttt{tenant-002}) z kompletnym zestawem zasobów.
+  \item \textit{ResourceQuota} ogranicza sumaryczne zużycie CPU i pamięci per tenant.
+  \item \textit{NetworkPolicy} izoluje ruch sieciowy między tenantami.
+  \item Każdy tenant ma niezależny HPA, co umożliwia precyzyjne skalowanie per tenant.
+\end{itemize}
+
+\section{Planowane scenariusze testowe}
+
+Po zaimplementowaniu rozszerzenia \textit{multi-tenancy} planowane jest przeprowadzenie dodatkowych testów:
+
+\begin{enumerate}
+  \item \textbf{Test izolacji wydajnościowej} — symulacja scenariusza ,,głośnego sąsiada'' (\textit{noisy neighbor}), w którym jeden tenant generuje wysokie obciążenie, a drugi wysyła stały, niski ruch. Celem jest sprawdzenie, czy HPA chroni ,,cichego'' tenanta przed degradacją wydajności.
+  
+  \item \textbf{Test skalowania z tenantami} — porównanie efektywności HPA w wariancie z jednym tenantem vs. z wieloma tenantami. Oczekuje się, że HPA Custom RPS zachowa skuteczność niezależnie od liczby tenantów.
+  
+  \item \textbf{Test kosztu izolacji} — porównanie zużycia zasobów w modelu \textit{application-level} vs. \textit{namespace-per-tenant} przy tej samej liczbie tenantów i poziomie obciążenia.
+\end{enumerate}
+
+\section{Oczekiwane wyzwania}
+
+\begin{itemize}
+  \item \textbf{Narzut nagłówka \texttt{X-Tenant-ID}} — każdy mikroserwis musi walidować i propagować nagłówek, co wymaga modyfikacji kodu wszystkich serwisów.
+  \item \textbf{Eksplozja metryk} — metryki z etykietą \texttt{tenant\_id} zwiększają kardynalność szeregów czasowych, co może przeciążyć \textit{Prometheusa} przy dużej liczbie tenantów.
+  \item \textbf{Ograniczenia sprzętowe} — QNAP TS-464 (8\,GB RAM) może nie pomieścić wielu tenantów w modelu \textit{namespace-per-tenant} ze względu na narzut \textit{Kubernetes} na każdy \textit{namespace}.
+  \item \textbf{Synchronizacja HPA} — przy wielu tenantach współdzielących \textit{Deployment}, HPA może ,,przeskalować'' w odpowiedzi na jednego ,,głośnego'' tenanta, niepotrzebnie zwiększając koszty.
+\end{itemize}
+
+\section{Podsumowanie}
+
+Rozszerzenie \textit{SaaS Multi-Tenancy} stanowi logiczną kontynuację badań nad skalowalnością — po ustaleniu, która strategia HPA jest najskuteczniejsza dla danego profilu obciążeniowego, kolejnym krokiem jest sprawdzenie, czy wnioski te utrzymują się w środowisku wielodostępnym (\textit{multi-tenant}). Implementacja tego rozszerzenia jest zaplanowana jako Faza VIII projektu i nie została jeszcze zrealizowana.

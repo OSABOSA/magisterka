@@ -35,3 +35,15 @@ secrets/
 # Test artifacts
 *.tmp
 test-results/
+
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.lof
+*.lot
+*.out
+*.toc
+*.xdv
