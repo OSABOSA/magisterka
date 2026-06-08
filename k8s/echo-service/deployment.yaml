@@ -17,10 +17,14 @@ spec:
         app: echo-service
         tier: backend
     spec:
+      # --- POPRAWKA 1: Wymuszenie instalacji na apps-pool ---
+      nodeSelector:
+        workload: apps
       containers:
         - name: echo-service
-          image: echo-service:latest
-          imagePullPolicy: IfNotPresent
+          # --- POPRAWKA 2: Ścieżka do Artifact Registry w GCP (Zmień TWÓJ_ID_PROJEKTU) ---
+          image: europe-west3-docker.pkg.dev/magisterka-497513/magisterka-repo/echo-server:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8000
           resources:
