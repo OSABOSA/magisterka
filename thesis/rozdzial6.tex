@@ -7,18 +7,18 @@
 
 Zgodnie z planem pracy (Faza VIII), rozszerzenie systemu o model \textit{SaaS Multi-Tenancy} zostało zaplanowane jako końcowy etap projektu. Na obecnym etapie prac (stan na czerwiec 2026) funkcjonalność \textit{multi-tenancy} \textbf{nie została zaimplementowana} w kodzie źródłowym. W repozytorium nie występują nagłówki \texttt{X-Tenant-ID}, mechanizmy izolacji danych między tenantami ani konfiguracje \textit{namespace-per-tenant}.
 
-Niniejszy rozdział przedstawia zaprojektowaną koncepcję rozszerzenia \textit{SaaS}, która stanowi podstawę do przyszłej implementacji.
+Niniejszy rozdział przedstawia zaprojektowaną koncepcję rozszerzenia \textit{SaaS}, która stanowi podstawę do przyszłej implementacji. Koncepcja uwzględnia specyfikę środowiska GKE — zarządzanego klastra z natywną integracją z GCP — i zakłada wykorzystanie mechanizmów izolacji dostępnych w \textit{Kubernetes} (\textit{ResourceQuota}, \textit{NetworkPolicy}, \textit{Namespace}) zamiast rozwiązań lokalnych.
 
-\section{Koncepcja \textit{Multi-Tenancy} w systemie badawczym}
+\section{Koncepcja \textit{Multi-Tenancy} w środowisku GKE}
 
 \subsection{Model izolacji tenantów}
 
 Zaprojektowano dwa poziomy izolacji tenantów — lekki (\textit{application-level}) i pełny (\textit{namespace-per-tenant}):
 
 \begin{enumerate}
-  \item \textbf{Application-level multi-tenancy} — tenanci są rozróżniani na poziomie aplikacji przez nagłówek \texttt{X-Tenant-ID}. Wszyscy tenanci współdzielą ten sam \textit{Deployment} i \textit{namespace}. Izolacja dotyczy wyłącznie danych (np. klucze cache w \texttt{memory-service} są prefiksowane identyfikatorem tenanta), natomiast zasoby obliczeniowe są współdzielone. Ten poziom jest najprostszy w implementacji i najbardziej ekonomiczny, ale nie zapewnia izolacji wydajnościowej.
+  \item \textbf{Application-level multi-tenancy} — tenanci są rozróżniani na poziomie aplikacji przez nagłówek \texttt{X-Tenant-ID}. Wszyscy tenanci współdzielą ten sam \textit{Deployment} i \textit{namespace}. Izolacja dotyczy wyłącznie danych (np. klucze cache w \texttt{memory-service} są prefiksowane identyfikatorem tenanta), natomiast zasoby obliczeniowe są współdzielone. Ten poziom jest najprostszy w implementacji i najbardziej ekonomiczny — nie wymaga dodatkowych zasobów \textit{Kubernetes} per tenant. Nie zapewnia jednak izolacji wydajnościowej: ,,głośny sąsiad'' (\textit{noisy neighbor}) może zdegradować wydajność innych tenantów.
 
-  \item \textbf{Namespace-per-tenant} — każdy tenant otrzymuje dedykowany \textit{namespace} z własnymi \textit{Deploymentami}, \textit{HPA}, \textit{ResourceQuota} i \textit{NetworkPolicy}. Zapewnia to pełną izolację zasobów i wydajności, ale zwiększa koszt infrastrukturalny proporcjonalnie do liczby tenantów.
+  \item \textbf{Namespace-per-tenant} — każdy tenant otrzymuje dedykowany \textit{namespace} (np. \texttt{tenant-001}, \texttt{tenant-002}) z własnymi \textit{Deploymentami}, \textit{HPA}, \textit{ResourceQuota} i \textit{NetworkPolicy}. Zapewnia to pełną izolację zasobów i wydajności. W środowisku GKE model ten jest skalowalny dzięki automatycznemu skalowaniu węzłów (\textit{cluster autoscaler}) — w przeciwieństwie do lokalnego klastra na pojedynczym serwerze, gdzie zasoby są ograniczone fizycznym sprzętem.
 \end{enumerate}
 
 \subsection{Projektowana architektura}
@@ -29,39 +29,74 @@ W modelu \textit{application-level multi-tenancy}:
   \item \textbf{Nagłówek \texttt{X-Tenant-ID}} — każdy mikroserwis odczytuje identyfikator tenanta z nagłówka HTTP. W przypadku jego braku, żądanie jest odrzucane z kodem 400.
   \item \textbf{Izolacja danych} — \texttt{memory-service} używa prefiksów kluczy (\texttt{<tenant\_id>:<key>}), zapewniając logiczną separację danych w obrębie jednego \textit{in-memory cache}.
   \item \textbf{Metryki per tenant} — \textit{Prometheus} zbiera metryki z etykietą \texttt{tenant\_id}, umożliwiając analizę wydajności w podziale na tenantów.
-  \item \textbf{HPA z etykietami} — \textit{HorizontalPodAutoscaler} uwzględnia obciążenie od wszystkich tenantów łącznie, co odzwierciedla realistyczny scenariusz SaaS, gdzie infrastruktura jest współdzielona.
+  \item \textbf{HPA z etykietami} — \textit{HorizontalPodAutoscaler} uwzględnia obciążenie od wszystkich tenantów łącznie, co odzwierciedla realistyczny scenariusz \textit{SaaS}, gdzie infrastruktura jest współdzielona.
 \end{itemize}
 
 W modelu \textit{namespace-per-tenant}:
 
 \begin{itemize}
   \item Każdy tenant ma własny \textit{namespace} (np. \texttt{tenant-001}, \texttt{tenant-002}) z kompletnym zestawem zasobów.
-  \item \textit{ResourceQuota} ogranicza sumaryczne zużycie CPU i pamięci per tenant.
-  \item \textit{NetworkPolicy} izoluje ruch sieciowy między tenantami.
-  \item Każdy tenant ma niezależny HPA, co umożliwia precyzyjne skalowanie per tenant.
+  \item \textit{ResourceQuota} ogranicza sumaryczne zużycie CPU i pamięci per tenant:
+  \begin{lstlisting}[language=yaml, caption={Przykładowa \textit{ResourceQuota} per tenant}, label={lst:resource-quota}]
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: tenant-quota
+  namespace: tenant-001
+spec:
+  hard:
+    requests.cpu: "2000m"
+    requests.memory: "2Gi"
+    limits.cpu: "4000m"
+    limits.memory: "4Gi"
+    pods: "15"
+  \end{lstlisting}
+  \item \textit{NetworkPolicy} izoluje ruch sieciowy między tenantami — Pody w namespace \texttt{tenant-001} nie mogą komunikować się z Podami w \texttt{tenant-002}, z wyjątkiem jawnie dozwolonych ścieżek.
+  \item Każdy tenant ma niezależny HPA, co umożliwia precyzyjne skalowanie per tenant — przeciążenie jednego tenanta nie wpływa na decyzje HPA dla innych tenantów.
+\end{itemize}
+
+\section{Rozważania dotyczące wdrożenia na GKE}
+
+Wdrożenie modelu \textit{namespace-per-tenant} na GKE różni się istotnie od wdrożenia na lokalnym klastrze:
+
+\begin{itemize}
+  \item \textbf{Skalowalność węzłów} — \textit{GKE cluster autoscaler} automatycznie dodaje węzły, gdy liczba Podów przekracza dostępne zasoby. Eliminuje to ograniczenie sprzętowe występujące na pojedynczym serwerze fizycznym (np. QNAP z 8\,GB RAM), gdzie wszystkie Pody muszą zmieścić się w stałej puli zasobów.
+
+  \item \textbf{Koszt infrastruktury} — w modelu \textit{pay-as-you-go} GCP, każdy dodatkowy węzeł generuje koszt. Izolacja \textit{namespace-per-tenant} jest zatem droższa niż \textit{application-level}, ale zapewnia lepszą izolację. Analiza kosztowa różnych strategii HPA w kontekście \textit{multi-tenancy} stanowi potencjalny kierunek dalszych badań.
+
+  \item \textbf{LoadBalancer per tenant} — w modelu \textit{namespace-per-tenant} każdy tenant może wymagać osobnego \textit{LoadBalancera}, co zwiększa koszty i złożoność. Alternatywnie, pojedynczy \textit{Ingress} (\textit{GKE Ingress Controller}) może rutować ruch na podstawie nagłówka \texttt{Host} lub ścieżki, eliminując potrzebę wielu \textit{LoadBalancerów}.
+
+  \item \textbf{Eksplozja metryk} — metryki z etykietą \texttt{tenant\_id} zwiększają kardynalność szeregów czasowych w \textit{Prometheusie}. Przy dużej liczbie tenantów może to prowadzić do przeciążenia \textit{Prometheusa}. Rozwiązaniem jest agregacja metryk na poziomie \textit{recording rules} lub użycie \textit{Thanos}/\textit{Cortex} do długoterminowego przechowywania metryk.
 \end{itemize}
 
 \section{Planowane scenariusze testowe}
 
-Po zaimplementowaniu rozszerzenia \textit{multi-tenancy} planowane jest przeprowadzenie dodatkowych testów:
+Po zaimplementowaniu rozszerzenia \textit{multi-tenancy} planowane jest przeprowadzenie dodatkowych testów na klastrze GKE:
 
 \begin{enumerate}
-  \item \textbf{Test izolacji wydajnościowej} — symulacja scenariusza ,,głośnego sąsiada'' (\textit{noisy neighbor}), w którym jeden tenant generuje wysokie obciążenie, a drugi wysyła stały, niski ruch. Celem jest sprawdzenie, czy HPA chroni ,,cichego'' tenanta przed degradacją wydajności.
-  
-  \item \textbf{Test skalowania z tenantami} — porównanie efektywności HPA w wariancie z jednym tenantem vs. z wieloma tenantami. Oczekuje się, że HPA Custom RPS zachowa skuteczność niezależnie od liczby tenantów.
-  
-  \item \textbf{Test kosztu izolacji} — porównanie zużycia zasobów w modelu \textit{application-level} vs. \textit{namespace-per-tenant} przy tej samej liczbie tenantów i poziomie obciążenia.
+  \item \textbf{Test izolacji wydajnościowej} — symulacja scenariusza ,,głośnego sąsiada'' (\textit{noisy neighbor}), w którym jeden tenant generuje wysokie obciążenie (ramp-up \textit{k6} do 50 VU), a drugi wysyła stały, niski ruch (5 VU). Celem jest sprawdzenie, czy HPA chroni ,,cichego'' tenanta przed degradacją wydajności. Test przeprowadzony zostanie dla obu modeli izolacji (\textit{application-level} i \textit{namespace-per-tenant}).
+
+  \item \textbf{Test skalowania z tenantami} — porównanie efektywności HPA w wariancie z jednym tenantem vs. z wieloma tenantami (2, 5, 10). Oczekuje się, że HPA Custom RPS zachowa skuteczność niezależnie od liczby tenantów, podczas gdy HPA CPU może wykazywać degradację przy wielu tenantach o różnych profilach.
+
+  \item \textbf{Test kosztu izolacji} — porównanie zużycia zasobów (liczba węzłów GKE, łączne CPU i pamięć) w modelu \textit{application-level} vs. \textit{namespace-per-tenant} przy tej samej liczbie tenantów i poziomie obciążenia.
+
+  \item \textbf{Test odporności na zjawiska anomalne} — weryfikacja, czy zjawiska \textit{HPA Lag}, \textit{Cold Start Latency} i \textit{CPU Throttling Cascade} (opisane w Rozdziale 5) nasilają się w środowisku \textit{multi-tenant}. W szczególności: czy \textit{noisy neighbor} może wywołać \textit{CPU Throttling Cascade} u innych tenantów współdzielących ten sam \textit{Deployment}.
 \end{enumerate}
 
 \section{Oczekiwane wyzwania}
 
 \begin{itemize}
-  \item \textbf{Narzut nagłówka \texttt{X-Tenant-ID}} — każdy mikroserwis musi walidować i propagować nagłówek, co wymaga modyfikacji kodu wszystkich serwisów.
-  \item \textbf{Eksplozja metryk} — metryki z etykietą \texttt{tenant\_id} zwiększają kardynalność szeregów czasowych, co może przeciążyć \textit{Prometheusa} przy dużej liczbie tenantów.
-  \item \textbf{Ograniczenia sprzętowe} — QNAP TS-464 (8\,GB RAM) może nie pomieścić wielu tenantów w modelu \textit{namespace-per-tenant} ze względu na narzut \textit{Kubernetes} na każdy \textit{namespace}.
-  \item \textbf{Synchronizacja HPA} — przy wielu tenantach współdzielących \textit{Deployment}, HPA może ,,przeskalować'' w odpowiedzi na jednego ,,głośnego'' tenanta, niepotrzebnie zwiększając koszty.
+  \item \textbf{Narzut nagłówka \texttt{X-Tenant-ID}} — każdy mikroserwis musi walidować i propagować nagłówek, co wymaga modyfikacji kodu wszystkich serwisów. W modelu \textit{application-level} nagłówek musi być przekazywany między serwisami (np. z \texttt{io-service} do \texttt{echo-server}), co wymaga instrumentacji klienta HTTP (\texttt{httpx.AsyncClient}).
+
+  \item \textbf{Eksplozja metryk} — metryki z etykietą \texttt{tenant\_id} zwiększają kardynalność szeregów czasowych, co może przeciążyć \textit{Prometheusa} przy dużej liczbie tenantów. Rozwiązaniem jest ostrożne zarządzanie etykietami i ewentualne użycie \textit{recording rules} do preagregacji.
+
+  \item \textbf{Synchronizacja HPA w modelu application-level} — przy wielu tenantach współdzielących \textit{Deployment}, HPA może ,,przeskalować'' w odpowiedzi na jednego ,,głośnego'' tenanta, niepotrzebnie zwiększając koszty dla wszystkich. Jest to inherentna wada modelu \textit{application-level}, która motywuje model \textit{namespace-per-tenant} dla zastosowań produkcyjnych.
+
+  \item \textbf{Złożoność konfiguracji namespace-per-tenant} — każdy nowy tenant wymaga utworzenia \textit{namespace}, \textit{Deploymentów}, \textit{Serwisów}, \textit{HPA}, \textit{ResourceQuota} i \textit{NetworkPolicy}. Automatyzacja tego procesu (np. przez \textit{Helm chart} per tenant lub operator \textit{Kubernetes}) jest niezbędna dla skalowalności operacyjnej.
 \end{itemize}
 
 \section{Podsumowanie}
 
-Rozszerzenie \textit{SaaS Multi-Tenancy} stanowi logiczną kontynuację badań nad skalowalnością — po ustaleniu, która strategia HPA jest najskuteczniejsza dla danego profilu obciążeniowego, kolejnym krokiem jest sprawdzenie, czy wnioski te utrzymują się w środowisku wielodostępnym (\textit{multi-tenant}). Implementacja tego rozszerzenia jest zaplanowana jako Faza VIII projektu i nie została jeszcze zrealizowana.
+Rozszerzenie \textit{SaaS Multi-Tenancy} stanowi logiczną kontynuację badań nad skalowalnością — po ustaleniu, która strategia HPA jest najskuteczniejsza dla danego profilu obciążeniowego, kolejnym krokiem jest sprawdzenie, czy wnioski te utrzymują się w środowisku wielodostępnym (\textit{multi-tenant}). Środowisko GKE, z automatycznym skalowaniem węzłów i natywną integracją z ekosystemem GCP, jest naturalną platformą do tych badań — eliminuje bowiem ograniczenia sprzętowe występujące na pojedynczym serwerze lokalnym i umożliwia testowanie z realistyczną liczbą tenantów.
+
+Implementacja tego rozszerzenia jest zaplanowana jako Faza VIII projektu i nie została jeszcze zrealizowana.

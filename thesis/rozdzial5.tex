@@ -3,30 +3,39 @@
 % =============================================================================
 \chapter{Badania eksperymentalne i analiza wyników}
 
-Rozdział niniejszy opisuje metodykę badań eksperymentalnych oraz przedstawia analizę wyników. Badania zostały zaprojektowane w celu empirycznej weryfikacji hipotezy badawczej: skuteczność strategii HPA zależy od charakterystyki obciążeniowej aplikacji.
+Rozdział niniejszy opisuje metodykę badań eksperymentalnych oraz przedstawia analizę wyników. Badania zostały zaprojektowane w celu empirycznej weryfikacji hipotezy badawczej: skuteczność strategii HPA zależy od charakterystyki obciążeniowej aplikacji. Wszystkie eksperymenty są przeprowadzane w środowisku \textit{Google Cloud Platform} (GCP), z klastrem \textit{Google Kubernetes Engine} (GKE) jako platformą badawczą.
 
 \section{Metodyka badań}
 
-\subsection{Środowisko testowe}
+\subsection{Środowisko testowe — GKE}
 
-Badania prowadzone są w dwóch środowiskach:
+Badania są prowadzone wyłącznie w środowisku chmurowym \textit{Google Cloud Platform}, składającym się z następujących komponentów:
 
-\begin{enumerate}
-  \item \textbf{Środowisko lokalne} — klaster \textit{k3s} na serwerze QNAP TS-464 (8\,GB RAM, 4-rdzeniowy procesor Intel Celeron). Wszystkie komponenty (mikroserwisy, monitoring, \textit{prometheus-adapter}) działają w namespace \texttt{magisterka}. Ruch z \textit{k6} do serwisów jest kierowany przez \texttt{kubectl port-forward}, co zapewnia minimalne opóźnienie sieciowe ($<1$\,ms).
-  \item \textbf{Środowisko chmurowe (GKE)} — % TODO: uzupełnić po zakończeniu badań na GKE
-  zarządzany klaster \textit{Google Kubernetes Engine} (GKE) na maszynach \texttt{e2-standard-4} (4 vCPU, 16\,GB RAM). Środowisko chmurowe umożliwia weryfikację wyników uzyskanych lokalnie w warunkach zbliżonych do produkcyjnych.
-\end{enumerate}
+\begin{itemize}
+  \item \textbf{GKE Cluster} — zarządzany klaster \textit{Kubernetes} na maszynach \texttt{e2-standard-4} (4 vCPU, 16\,GB RAM). Klaster działa w konfiguracji VPC-native, z automatycznym skalowaniem węzłów (\textit{cluster autoscaler}). Wszystkie zasoby badawcze są wdrażane w namespace \texttt{magisterka}.
+
+  \item \textbf{k6-generator} — dedykowana maszyna \textit{Compute Engine} w tej samej sieci VPC co klaster GKE. Maszyna jest wyłącznym hostem dla narzędzia \textit{k6}, generującego obciążenie testowe. Współdzielenie sieci VPC zapewnia niskie opóźnienie ($\sim$1--5\,ms) między generatorem obciążenia a serwisami aplikacyjnymi, a separacja maszyn zapobiega zakłócaniu wyników przez konkurencję o zasoby.
+
+  \item \textbf{GCP LoadBalancer} — każdy serwis aplikacyjny (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}) jest eksponowany jako \texttt{Service} typu \texttt{LoadBalancer}. GKE automatycznie tworzy zewnętrzny \textit{GCP LoadBalancer} (Layer 4, TCP) i przydziela mu publiczny adres IP. Ruch z \texttt{k6-generator} trafia bezpośrednio na te adresy IP.
+
+  \item \textbf{kube-prometheus-stack} — stos monitorujący (\textit{Prometheus}, \textit{Grafana}, \textit{kube-state-metrics}, \textit{node-exporter}) instalowany przez \textit{Helm}. \textit{Grafana} jest eksponowana przez \texttt{LoadBalancer}, co umożliwia obserwację eksperymentów w czasie rzeczywistym.
+\end{itemize}
 
 \subsection{Procedura eksperymentalna}
 
 Każdy z 8 scenariuszy badawczych (2 bazowe + 6 z macierzy $2 \times 3$) jest wykonywany według ściśle określonej procedury:
 
 \begin{enumerate}
-  \item \textbf{Przygotowanie} — usunięcie wszystkich istniejących HPA dla docelowego serwisu, nałożenie pliku HPA odpowiadającego testowanej strategii.
+  \item \textbf{Przygotowanie} — usunięcie wszystkich istniejących HPA dla docelowego serwisu, nałożenie pliku HPA odpowiadającego testowanej strategii (przez \texttt{kubectl apply} z poziomu \texttt{k6-generator}).
+
   \item \textbf{Reset} — skalowanie \textit{Deploymentu} do 1 repliki (\texttt{kubectl scale --replicas=1}), oczekiwanie na gotowość (\texttt{rollout status}).
-  \item \textbf{Obciążenie} — uruchomienie skryptu \textit{k6} odpowiedniego dla profilu obciążeniowego (\texttt{cpu-load-test.js} lub \texttt{io-load-test.js}).
-  \item \textbf{Zapis} — wyniki \textit{k6} (JSON + tekstowe podsumowanie) oraz metadane uruchomienia zapisywane do \texttt{results/<scenario>/run-<i>/}.
+
+  \item \textbf{Obciążenie} — uruchomienie skryptu \textit{k6} odpowiedniego dla profilu obciążeniowego (\texttt{cpu-load-test.js} lub \texttt{io-load-test.js}). Ruch jest kierowany na adresy IP \textit{GCP LoadBalancer} przez mechanizm \texttt{options.hosts} w skryptach \textit{k6} — bez konfiguracji DNS ani tunelowania \texttt{port-forward}.
+
+  \item \textbf{Zapis} — wyniki \textit{k6} (JSON + tekstowe podsumowanie) oraz metadane uruchomienia zapisywane do \texttt{results/<scenario>/run-<i>/}. Dodatkowo, z \textit{Grafany} eksportowanych jest 5 zestawów danych CSV dla każdego powtórzenia.
+
   \item \textbf{Powtórzenie} — kroki 1--4 powtarzane 5-krotnie dla każdego scenariusza.
+
   \item \textbf{Stabilizacja} — po każdym scenariuszu: skalowanie obu serwisów do 1 repliki, usunięcie wszystkich HPA, odczekanie 120 sekund (\textit{cooldown}).
 \end{enumerate}
 
@@ -36,7 +45,16 @@ Dla każdego powtórzenia każdego scenariusza zbierane są następujące dane:
 
 \begin{itemize}
   \item \textbf{Metryki HTTP z k6}: liczba żądań, RPS (\textit{throughput}), percentyle czasu odpowiedzi (p50, p95, p99), minimalny/maksymalny/średni czas odpowiedzi, liczba błędów HTTP ($\geq 400$).
-  \item \textbf{Metryki infrastrukturalne z Prometheusa}: zużycie CPU per Pod (w milijednostkach), zużycie pamięci per Pod (w bajtach), liczba replik w czasie, stan HPA (pożądana vs. aktualna liczba replik).
+
+  \item \textbf{Eksporty CSV z Grafany} — dla każdego scenariusza eksportowanych jest 5 zestawów danych szeregów czasowych:
+  \begin{enumerate}
+    \item \texttt{replicas.csv} — liczba replik HPA w funkcji czasu (źródło: \texttt{kube\_deployment\_spec\_replicas}).
+    \item \texttt{cpu\_mcpu.csv} — zużycie CPU per Pod w milijednostkach (źródło: \texttt{container\_cpu\_usage\_seconds\_total}).
+    \item \texttt{memory\_mb.csv} — zużycie pamięci per Pod w megabajtach (źródło: \texttt{container\_memory\_working\_set\_bytes}).
+    \item \texttt{rps.csv} — przepustowość w funkcji czasu (źródło: \texttt{rate(http\_requests\_total[30s])}).
+    \item \texttt{latency\_ms.csv} — percentyle opóźnień w funkcji czasu: p50, p95, p99 (źródło: \texttt{histogram\_quantile()} na \texttt{http\_request\_duration\_seconds\_bucket}).
+  \end{enumerate}
+
   \item \textbf{Metadane}: scenariusz, strategia HPA, numer powtórzenia, timestamp, kod wyjścia k6.
 \end{itemize}
 
@@ -46,24 +64,24 @@ Na podstawie surowych danych obliczane są następujące metryki badawcze:
 
 \begin{enumerate}
   \item \textbf{Średnia przepustowość} ($T$) — średnia liczba żądań na sekundę w trakcie testu, obliczana jako $\text{total\_requests} / \text{duration}$.
-  
+
   \item \textbf{Opóźnienie p95} ($L_{95}$) — 95. percentyl czasu odpowiedzi HTTP (ms). Reprezentuje najgorszy akceptowalny czas odpowiedzi.
-  
+
   \item \textbf{Czas do skalowania} ($t_{\text{scale}}$) — czas od momentu przekroczenia progu HPA do osiągnięcia docelowej liczby replik. Definiowany jako $t_{\text{target\_replicas}} - t_{\text{threshold\_crossed}}$.
-  
+
   \item \textbf{Efektywność skalowania} ($E$) — stosunek względnej zmiany przepustowości do względnej zmiany liczby replik:
   \begin{equation}
     E = \frac{\Delta T / T_{\text{min}}}{\Delta R / R_{\text{min}}}
   \end{equation}
   gdzie $T_{\text{min}}$ i $T_{\text{max}}$ to minimalna i maksymalna przepustowość w trakcie testu, a $R_{\text{min}}$ i $R_{\text{max}}$ to minimalna i maksymalna liczba replik. Wartość $E = 1$ oznacza skalowanie liniowe; $E < 1$ oznacza malejące korzyści z dodawania replik; $E > 1$ oznacza ponadliniową poprawę (rzadkie).
-  
+
   \item \textbf{Stopa błędów} ($e$) — odsetek żądań zakończonych kodem HTTP $\geq 400$:
   \begin{equation}
     e = \frac{\text{failed\_requests}}{\text{total\_requests}} \times 100\%
   \end{equation}
-  
+
   \item \textbf{Amplituda skalowania} ($A_R$) — różnica między maksymalną a minimalną liczbą replik w trakcie testu: $A_R = R_{\text{max}} - R_{\text{min}}$. Większa amplituda oznacza, że HPA zareagował na obciążenie.
-  
+
   \item \textbf{Średnie zużycie CPU} — średnie zużycie procesora w milijednostkach (mCPU) na Pod, uśrednione po wszystkich Podach w trakcie testu.
 \end{enumerate}
 
@@ -128,10 +146,10 @@ Scenariusze \texttt{baseline-cpu} i \texttt{baseline-io} testują zachowanie sys
   \label{tab:io-scenarios}
 \end{table}
 
-\section{Wyniki eksperymentalne — środowisko lokalne (k3s)}
+\section{Wyniki eksperymentalne — środowisko GKE}
 
-% TODO: uzupełnić po wykonaniu badań na k3s
-% Poniższe sekcje zawierają strukturę do wypełnienia wynikami.
+% TODO: uzupełnić po wykonaniu badań na GKE
+% Poniższe sekcje zawierają strukturę do wypełnienia wynikami z eksperymentów na klastrze GKE.
 
 \subsection{Scenariusze bazowe}
 
@@ -204,22 +222,68 @@ Scenariusze \texttt{baseline-cpu} i \texttt{baseline-io} testują zachowanie sys
 
 \subsection{Wykresy przebiegu skalowania}
 
-% TODO: wygenerować wykresy z danych Prometheusa po wykonaniu testów
-% Poniższy kod TikZ jest szablonem do wypełnienia danymi z results/
+% TODO: wygenerować wykresy z danych Prometheusa (eksporty CSV z Grafany) po wykonaniu testów
+% Źródło danych: results/<scenario>/run-<i>/replicas.csv
+
+Poniższe wykresy będą generowane z danych CSV eksportowanych z \textit{Grafany}:
 
 \begin{figure}[H]
   \centering
   % TODO: \begin{tikzpicture} ... \end{tikzpicture}
-  \caption{Przebieg skalowania dla scenariusza \texttt{cpu-cpu} — liczba replik w czasie}
+  \caption{Przebieg skalowania dla scenariusza \texttt{cpu-cpu} — liczba replik HPA w czasie (źródło: \texttt{replicas.csv})}
   \label{fig:scaling-cpu-cpu}
 \end{figure}
 
 \begin{figure}[H]
   \centering
   % TODO: \begin{tikzpicture} ... \end{tikzpicture}
-  \caption{Przebieg skalowania dla scenariusza \texttt{io-custom} — liczba replik w czasie}
+  \caption{Przebieg skalowania dla scenariusza \texttt{io-custom} — liczba replik HPA w czasie (źródło: \texttt{replicas.csv})}
   \label{fig:scaling-io-custom}
 \end{figure}
+
+\subsection{Analiza zjawisk anomalnych}
+
+W trakcie eksperymentów na GKE szczególna uwaga zostanie poświęcona trzem zjawiskom przejściowym, które mają istotny wpływ na zachowanie systemów \textit{SaaS} w środowisku chmurowym. Każde z tych zjawisk jest identyfikowane na podstawie danych z eksportów CSV z \textit{Grafany} oraz logów \textit{k6}.
+
+\subsubsection{HPA Lag — opóźnienie reakcji autoskalera}
+
+\textit{HPA Lag} to opóźnienie między przekroczeniem progu metryki a faktycznym utworzeniem i osiągnięciem gotowości przez nowe Pody. Opóźnienie to wynosi $\sim$60--90 sekund i składa się z następujących faz:
+
+\begin{enumerate}
+  \item \textbf{Scrapowanie metryk} ($\sim$0--15\,s) — \textit{Prometheus} zbiera metryki w interwale 15-sekundowym. Nowa wartość metryki pojawi się w \textit{Prometheusie} najpóźniej po jednym pełnym cyklu scrapowania.
+  \item \textbf{Odświeżenie HPA} ($\sim$0--15\,s) — kontroler HPA pobiera metryki co 15 sekund. Decyzja o skalowaniu może być opóźniona o ten interwał.
+  \item \textbf{Tworzenie Podów} ($\sim$2--5\,s) — \textit{kube-scheduler} przydziela Poda do węzła, \textit{kubelet} rozpoczyna tworzenie kontenera.
+  \item \textbf{Cold Start} ($\sim$15--30\,s) — pobranie obrazu z \textit{GCP Artifact Registry}, uruchomienie kontenera, zaliczenie \textit{readiness probe}. W tym oknie Pod jest już widoczny dla \textit{LoadBalancera}, ale nie obsługuje jeszcze ruchu.
+\end{enumerate}
+
+W okresie \textit{HPA Lag} istniejące Pody są przeciążone (przekroczyły próg metryki), a nowe repliki nie są jeszcze gotowe. Prowadzi to do podwyższonych opóźnień percentyla P99 oraz potencjalnych błędów HTTP 502/503. Zjawisko to jest dokumentowane dla każdego scenariusza na podstawie przesunięcia czasowego między krzywą RPS (rosnącą) a krzywą liczby replik (opóźnioną) w danych CSV.
+
+\subsubsection{Cold Start Latency — opóźnienie zimnego startu Podów}
+
+\textit{Cold Start Latency} to czas potrzebny nowo utworzonemu Podowi na osiągnięcie gotowości do obsługi ruchu. Obejmuje:
+
+\begin{itemize}
+  \item \textbf{Pobranie obrazu} — ściągnięcie obrazu kontenera z \textit{GCP Artifact Registry} do lokalnego cache \textit{containerd} na węźle. W przypadku pierwszego uruchomienia na danym węźle (lub nowej wersji obrazu z \texttt{imagePullPolicy: Always}) czas ten wynosi 5--20 sekund w zależności od rozmiaru obrazu i przepustowości sieci.
+  \item \textbf{Start kontenera} — uruchomienie procesu \textit{Uvicorn}, inicjalizacja aplikacji \textit{FastAPI}, załadowanie zależności — $\sim$2--5 sekund.
+  \item \textbf{Readiness probe} — pierwsza sonda \textit{readiness} (\texttt{GET /health}) wykonywana jest z opóźnieniem \texttt{initialDelaySeconds=5} i okresem \texttt{periodSeconds=10}. Pod jest uznawany za gotowy po pierwszym sukcesie sondy.
+\end{itemize}
+
+Łączny czas \textit{Cold Start Latency} wynosi 15--30 sekund. W tym oknie \textit{GCP LoadBalancer} może już kierować ruch do niedojrzałego Poda (przed zaliczeniem \textit{readiness probe}), co skutkuje błędami HTTP 502/503 rejestrowanymi przez \textit{k6}. Zjawisko to jest szczególnie widoczne w pierwszych minutach po decyzji HPA o skalowaniu w górę.
+
+\subsubsection{CPU Throttling Cascade — kaskadowe błędy przy throttlingu CPU}
+
+\textit{CPU Throttling Cascade} to zjawisko kaskadowej degradacji wydajności, gdy Pody osiągają limit CPU podczas gwałtownego wzrostu ruchu. Mechanizm przebiega następująco:
+
+\begin{enumerate}
+  \item \textbf{Wzrost ruchu} — liczba żądań rośnie (scenariusz ramp-up w \textit{k6}).
+  \item \textbf{Przekroczenie CPU limit} — Pody osiągają limit CPU (\texttt{cpu-service}: 1000\,m, \texttt{io-service}: 500\,m). Mechanizm \textit{CFS bandwidth control} w jądrze Linux ogranicza czas procesora dla kontenera (\textit{CPU throttling}).
+  \item \textbf{Kolejkowanie żądań} — ograniczony czas CPU powoduje, że \textit{Uvicorn} nie nadąża z przetwarzaniem żądań. Żądania są kolejkowane, co zwiększa czas odpowiedzi.
+  \item \textbf{Timeouty} — czas odpowiedzi przekracza timeout \textit{k6} (domyślnie 60\,s) lub timeout \textit{LoadBalancera}. \textit{k6} rejestruje błędy typu \texttt{dial: i/o timeout} lub \texttt{request timeout}.
+  \item \textbf{Efekt kaskadowy} — kolejkowane żądania blokują wątki robocze \textit{Uvicorn}, uniemożliwiając obsługę nowych żądań. Powstaje dodatnia pętla sprzężenia zwrotnego: im więcej żądań jest kolejkowanych, tym mniejsza jest zdolność do ich obsługi.
+  \item \textbf{Ustąpienie} — degradacja trwa do momentu osiągnięcia gotowości przez nowe Pody (utworzone przez HPA). Gdy nowe repliki zaczynają obsługiwać ruch, obciążenie na Pod spada poniżej limitu CPU i wydajność wraca do normy.
+\end{enumerate}
+
+\textit{CPU Throttling Cascade} jest szczególnie niebezpieczny w systemach \textit{SaaS}, gdzie jeden przeciążony tenant może spowodować kaskadową degradację dla wszystkich tenantów współdzielących infrastrukturę. Zjawisko to jest analizowane na podstawie korelacji między danymi z \texttt{cpu\_mcpu.csv} (zużycie CPU zbliżające się do limitu) a \texttt{latency\_ms.csv} (gwałtowny wzrost opóźnień) oraz metrykami błędów z \textit{k6}.
 
 \section{Analiza wyników}
 
@@ -259,10 +323,19 @@ Oczekiwany rezultat: Dla obciążenia \textit{I/O-bound}, strategia HPA CPU powi
   \label{tab:efficiency}
 \end{table}
 
-\section{Wyniki eksperymentalne — środowisko chmurowe (GKE)}
+\subsection{Analiza zjawisk anomalnych — podsumowanie obserwacji}
 
-% TODO: uzupełnić po zakończeniu badań na GKE
-% Sekcja będzie zawierać analogiczne tabele i wykresy dla środowiska GKE
+% TODO: uzupełnić po zebraniu danych z eksportów CSV
+
+Na podstawie danych z 5 eksportów CSV na scenariusz możliwe będzie ilościowe scharakteryzowanie trzech zjawisk anomalnych:
+
+\begin{itemize}
+  \item \textbf{HPA Lag} — mierzone jako przesunięcie czasowe między początkiem wzrostu RPS (\texttt{rps.csv}) a początkiem wzrostu liczby replik (\texttt{replicas.csv}). Oczekiwana wartość: $\sim$60--90\,s, zależna od interwałów scrapowania \textit{Prometheusa} i odświeżania HPA.
+
+  \item \textbf{Cold Start Latency} — mierzone jako czas między pierwszym pojawieniem się nowej repliki w \texttt{replicas.csv} a spadkiem opóźnień P99 (\texttt{latency\_ms.csv}) do poziomu sprzed skalowania. Oczekiwana wartość: $\sim$15--30\,s.
+
+  \item \textbf{CPU Throttling Cascade} — identyfikowane przez jednoczesne wystąpienie trzech warunków: (1) zużycie CPU per Pod zbliża się do limitu (\texttt{cpu\_mcpu.csv} $\approx$ 1000\,m dla \texttt{cpu-service}), (2) gwałtowny wzrost opóźnień P99 (\texttt{latency\_ms.csv}), (3) wzrost stopy błędów w metrykach \textit{k6}. Oczekiwany czas trwania: do momentu osiągnięcia gotowości przez nowe Pody.
+\end{itemize}
 
 \section{Dyskusja i interpretacja}
 
@@ -270,10 +343,11 @@ Oczekiwany rezultat: Dla obciążenia \textit{I/O-bound}, strategia HPA CPU powi
 
 Niniejsza sekcja będzie zawierać:
 \begin{itemize}
-  \item Porównanie wyników lokalnych (k3s) i chmurowych (GKE).
-  \item Identyfikację czynników wpływających na rozbieżności (opóźnienie sieciowe, różnice sprzętowe).
+  \item Analizę porównawczą skuteczności strategii HPA w środowisku GKE.
+  \item Ilościową charakterystykę zjawisk anomalnych (\textit{HPA Lag}, \textit{Cold Start Latency}, \textit{CPU Throttling Cascade}) na podstawie danych z eksportów CSV z \textit{Grafany}.
   \item Walidację lub falsyfikację hipotezy badawczej.
-  \item Ograniczenia metodologii (np. pojedynczy węzeł k3s, sztuczny charakter obciążenia).
+  \item Dyskusję implikacji wyników dla systemów \textit{SaaS} — szczególnie wpływu zjawisk anomalnych na współdzieloną infrastrukturę.
+  \item Ograniczenia metodologii (np. sztuczny charakter obciążenia, pojedyncza strefa GCP, stałe progi HPA).
 \end{itemize}
 
 \section{Wnioski z badań}
@@ -284,7 +358,12 @@ Oczekiwane wnioski:
 
 \begin{enumerate}
   \item \textbf{HPA CPU} jest skuteczne wyłącznie dla aplikacji \textit{CPU-bound}, gdzie zużycie procesora koreluje z obciążeniem. Dla aplikacji \textit{I/O-bound} HPA CPU nie reaguje na wzrost ruchu.
+
   \item \textbf{HPA Memory} jest nieskuteczne dla obu profili obciążeniowych — pamięć nie zmienia się proporcjonalnie do liczby żądań w testowanych aplikacjach.
+
   \item \textbf{HPA Custom RPS} jest uniwersalnie skuteczne — niezależnie od profilu aplikacji, liczba żądań na sekundę koreluje z obciążeniem, co czyni tę strategię najbardziej odporną na różnice w charakterystyce aplikacji.
+
   \item \textbf{Wybór metryki HPA musi być dopasowany do profilu aplikacji} — hipoteza badawcza zostaje potwierdzona.
+
+  \item \textbf{Zjawiska anomalne} (\textit{HPA Lag}, \textit{Cold Start Latency}, \textit{CPU Throttling Cascade}) mają istotny wpływ na wydajność systemów \textit{SaaS} w GKE — szczególnie w okresach gwałtownego wzrostu obciążenia. Świadomość tych zjawisk i ich ilościowa charakterystyka są niezbędne do prawidłowego projektowania polityk autoskalowania i progów akceptacji SLA.
 \end{enumerate}

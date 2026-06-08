@@ -63,18 +63,16 @@ Architektura \textit{Kubernetes} opiera się na klastrze składającym się z:
 
 Podstawową jednostką obliczeniową w \textit{Kubernetes} jest \textbf{Pod} — grupa jednego lub więcej kontenerów współdzielących przestrzeń sieciową i woluminy. Pody są efemeryczne — mogą być tworzone, niszczone i przenoszone między węzłami.
 
-\subsection{k3s — lekka dystrybucja Kubernetes}
+\subsection{GKE — zarządzany Kubernetes w Google Cloud}
 
-\textit{k3s} jest certyfikowaną dystrybucją \textit{Kubernetes} zoptymalizowaną pod kątem środowisk o ograniczonych zasobach (IoT, \textit{edge computing}, laboratoria). W porównaniu do standardowego \textit{Kubernetes}, \textit{k3s}:
+W niniejszej pracy jako platformę badawczą wybrano \textit{Google Kubernetes Engine} (GKE) — zarządzaną usługę \textit{Kubernetes} oferowaną przez \textit{Google Cloud Platform} (GCP). GKE automatyzuje zarządzanie warstwą sterowania (\textit{Control Plane}), aktualizacje wersji, skalowanie węzłów oraz integrację z ekosystemem GCP (równoważenie obciążenia, sieci VPC, \textit{Cloud Monitoring}). Wybór GKE podyktowany był następującymi czynnikami:
 
 \begin{itemize}
-  \item Pakuje wszystkie komponenty \textit{Control Plane} w pojedynczy binarny plik wykonywalny.
-  \item Zastępuje \textit{etcd} lekką bazą SQLite (domyślnie) lub osadzonym \textit{etcd}.
-  \item Usuwa nieużywane w mniejszych środowiskach kontrolery i \textit{admission plugins}.
-  \item Używa \textit{containerd} jako domyślnego \textit{container runtime}.
+  \item \textbf{Pełna zgodność API} — GKE jest certyfikowaną dystrybucją \textit{Kubernetes}, co oznacza, że wszystkie manifesty (Deployment, HPA, Service) działają identycznie jak na dowolnym innym klastrze zgodnym z CNCF.
+  \item \textbf{Zarządzana warstwa sterowania} — GKE automatycznie zarządza \textit{Control Plane}, eliminując konieczność ręcznej konfiguracji i utrzymania komponentów takich jak \textit{etcd} czy \textit{kube-apiserver}.
+  \item \textbf{Integracja z GCP LoadBalancer} — serwisy typu \texttt{LoadBalancer} są automatycznie udostępniane przez globalną sieć GCP, co umożliwia bezpośrednią komunikację z zewnętrznymi klientami (w tym z maszyny generującej obciążenie testowe).
+  \item \textbf{Elastyczność skalowania węzłów} — GKE umożliwia konfigurację \textit{node pools} i automatyczne skalowanie węzłów (\textit{cluster autoscaler}), co pozwala na dostosowanie infrastruktury do wymagań eksperymentów.
 \end{itemize}
-
-W niniejszej pracy \textit{k3s} został wybrany jako platforma dla lokalnego środowiska badawczego ze względu na niskie wymagania sprzętowe i prostotę instalacji.
 
 \section{Mechanizmy autoskalowania w Kubernetes}
 
@@ -143,7 +141,8 @@ Na podstawie przeglądu literatury zidentyfikowano następujące luki badawcze:
   \item \textbf{Brak systematycznego porównania strategii HPA dla różnych profili obciążeniowych} — większość badań testuje HPA na jednorodnym obciążeniu (np. wyłącznie CPU-bound), nie analizując interakcji między profilem obciążeniowym a wyborem metryki.
   \item \textbf{Ograniczona analiza HPA Memory} — strategia oparta na zużyciu pamięci jest rzadko badana, ponieważ pamięć w większości aplikacji nie koreluje z obciążeniem — niniejsza praca dostarcza empirycznych dowodów na tę tezę.
   \item \textbf{Brak badań łączących HPA z modelem SaaS} — istniejące badania nad \textit{multi-tenancy} koncentrują się na izolacji danych i bezpieczeństwie, pomijając wpływ wielodostępności na efektywność autoskalowania.
-  \item \textbf{Brak otwartego, odtwarzalnego środowiska badawczego} — większość eksperymentów jest trudna do odtworzenia ze względu na zamknięty kod lub specyficzne dla dostawcy chmury konfiguracje. Niniejsza praca udostępnia kompletne repozytorium kodu, konfiguracji i skryptów.
+  \item \textbf{Brak analizy zjawisk anomalnych w autoskalowaniu chmurowym} — istniejące badania koncentrują się na metrykach wydajnościowych (RPS, latency), pomijając analizę zjawisk przejściowych takich jak opóźnienie reakcji HPA (\textit{HPA Lag}), opóźnienie zimnego startu Podów (\textit{Cold Start Latency}) czy kaskadowe błędy przy \textit{CPU throttlingu}. Niniejsza praca identyfikuje i dokumentuje te zjawiska na podstawie eksperymentów w środowisku GKE.
+  \item \textbf{Brak otwartego, odtwarzalnego środowiska badawczego} — większość eksperymentów jest trudna do odtworzenia ze względu na zamknięty kod lub specyficzne dla dostawcy chmury konfiguracje. Niniejsza praca udostępnia kompletne repozytorium kodu, konfiguracji \textit{Kubernetes} i skryptów testowych, umożliwiając odtworzenie środowiska na dowolnym klastrze GKE.
 \end{enumerate}
 
 \section{Struktura pracy}
@@ -152,7 +151,7 @@ Praca składa się z siedmiu rozdziałów:
 
 \begin{itemize}
   \item \textbf{Rozdział 1} (niniejszy) — wprowadzenie teoretyczne, motywacja, hipoteza badawcza, przegląd literatury.
-  \item \textbf{Rozdział 2} — szczegółowy przegląd technologii wykorzystanych w projekcie: \textit{Kubernetes}, \textit{k3s}, \textit{Prometheus}, \textit{Grafana}, \textit{k6}, \textit{Docker}, \textit{Traefik}, \textit{GKE}.
+  \item \textbf{Rozdział 2} — szczegółowy przegląd technologii wykorzystanych w projekcie: \textit{Kubernetes}, \textit{GKE}, \textit{Prometheus}, \textit{Grafana}, \textit{k6}, \textit{Docker}, \textit{kube-prometheus-stack}, \textit{GCP LoadBalancer}, \textit{Compute Engine}.
   \item \textbf{Rozdział 3} — projekt architektury systemu badawczego: macierz badawcza, specyfikacja aplikacji, strategie HPA, infrastruktura monitorująca, plan eksperymentów.
   \item \textbf{Rozdział 4} — implementacja: struktura kodu, implementacja serwisów, konfiguracja \textit{Kubernetes}, monitoring, skrypty automatyzujące, scenariusze testowe.
   \item \textbf{Rozdział 5} — badania eksperymentalne i analiza wyników: metodyka, scenariusze testowe, wyniki, interpretacja, porównanie strategii.

@@ -22,19 +22,19 @@ magisterka/
     io-service/          # Deployment + Service + HPA x3
     echo-service/        # Deployment + Service
     memory-service/      # Deployment + Service + HPA
-    monitoring/          # Prometheus, Grafana, Prometheus Adapter
-    ingress.yaml         # Traefik Ingress
+    monitoring/          # Prometheus Adapter config
+    ingress.yaml         # Traefik Ingress (legacy, nieużywany na GKE)
   monitoring/
     dashboards/          # Grafana dashboard JSON
   scripts/
-    deploy-k3s.sh        # Full deployment pipeline
+    deploy-k3s.sh        # Skrypt wdrożeniowy (legacy, GKE używa kubectl apply)
     run-tests.sh         # Test orchestration (8 scenarios)
-    run-all.sh           # deploy + tests combined
+    run-all.sh           # deploy + tests combined (legacy)
   tests/
     k6/                  # k6 load test scripts
   docs/
     prd.md               # Product Requirements Document
-  docker-compose.yaml    # Local development environment
+  docker-compose.yaml    # Opcjonalny development (nieużywany w badaniach)
 \end{verbatim}
 
 \section{Implementacja mikroserwisów}
@@ -61,6 +61,18 @@ Wszystkie serwisy dzielą następujące cechy:
   lastline=8
 ]{../apps/cpu-service/Dockerfile}
 
+\subsection{Budowanie i dystrybucja obrazów}
+
+Obrazy Docker są budowane lokalnie i przesyłane do rejestru kontenerów GCP (\textit{Artifact Registry}) za pomocą poleceń \texttt{docker build} i \texttt{docker push}. Alternatywnie, \textit{Cloud Build} może budować obrazy bezpośrednio w GCP. GKE pobiera obrazy z rejestru automatycznie na podstawie pola \texttt{image} w \textit{Deploymencie}:
+
+\begin{lstlisting}[language=yaml, caption={Odwołanie do obrazu w GCP Artifact Registry (wzorzec)}, label={lst:gcp-image}]
+spec:
+  containers:
+    - name: cpu-service
+      image: europe-central2-docker.pkg.dev/PROJECT_ID/magisterka/cpu-service:latest
+      imagePullPolicy: Always
+\end{lstlisting}
+
 \subsection{CPU-service}
 
 \texttt{cpu-service} implementuje dwa endpointy obciążające procesor:
@@ -74,7 +86,7 @@ Endpoint akceptuje obraz w formacie \textit{multipart form-data}, wykonuje 5-eta
   \item Zastosowanie filtru \texttt{BLUR}.
   \item Zastosowanie filtru \texttt{SHARPEN}.
   \item Zastosowanie filtru \texttt{FIND\_EDGES}.
-  \item Ekstrakcja kanałów RGB i resize do $100 \times 100$ pikseli.
+  \item Ekstrakcja kanałów RGB i resize.
 \end{enumerate}
 
 Po przetworzeniu, dla każdego kanału obliczana jest entropia Shannona według wzoru:
@@ -93,7 +105,7 @@ Po przetworzeniu, dla każdego kanału obliczana jest entropia Shannona według 
 
 \subsubsection{GET /fibonacci — ciąg Fibonacciego}
 
-Endpoint oblicza $n$-tą liczbę Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^n)$. Parametr $n$ jest pobierany z \textit{query string} (domyślnie 30). Wybór rekurencyjnej implementacji jest celowy — algorytm ten jest skrajnie nieefektywny obliczeniowo, co gwarantuje wysokie zużycie CPU przy niewielkiej liczbie żądań.
+Endpoint oblicza $n$-tą liczbę Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^n)$. Parametr $n$ jest pobierany z \textit{query string} (domyślnie 25). Wybór rekurencyjnej implementacji jest celowy — algorytm ten jest skrajnie nieefektywny obliczeniowo, co gwarantuje wysokie zużycie CPU przy niewielkiej liczbie żądań.
 
 \lstinputlisting[
   language=Python,
@@ -193,7 +205,7 @@ Wszystkie zasoby \textit{Kubernetes} są wdrażane w dedykowanym \textit{namespa
 Każdy \textit{Deployment} definiuje:
 \begin{itemize}
   \item \texttt{replicas: 2} — początkowa liczba replik.
-  \item \texttt{imagePullPolicy: IfNotPresent} — obrazy są importowane lokalnie do \textit{containerd} k3s.
+  \item \texttt{imagePullPolicy: Always} — obrazy są pobierane z GCP Artifact Registry przy każdym wdrożeniu.
   \item \texttt{livenessProbe} i \texttt{readinessProbe} — sprawdzanie \texttt{GET /health} co 10 sekund, z początkowym opóźnieniem 5 sekund.
   \item \texttt{resources} — \textit{requests} i \textit{limits} CPU i pamięci (Tabela~\ref{tab:resource-allocation}).
 \end{itemize}
@@ -240,82 +252,83 @@ Dla \texttt{cpu-service} i \texttt{io-service} zdefiniowano po trzy warianty HPA
   lastline=24
 ]{../k8s/cpu-service/hpa-custom.yaml}
 
-\subsection{Services}
+\subsection{Services — LoadBalancer w GKE}
 
-Wszystkie serwisy \textit{Kubernetes} są typu \texttt{ClusterIP}, mapując port 80 na \texttt{targetPort 8000}:
+W odróżnieniu od typowego środowiska deweloperskiego (gdzie stosuje się \texttt{ClusterIP} z \texttt{port-forward}), wszystkie serwisy aplikacyjne są typu \texttt{LoadBalancer}. GKE automatycznie tworzy zewnętrzny \textit{GCP LoadBalancer} (Layer 4, TCP) i przydziela mu publiczny adres IP. Ruch z maszyny \texttt{k6-generator} trafia bezpośrednio na ten adres IP, co odzwierciedla warunki produkcyjne.
 
-\lstinputlisting[
-  language=yaml,
-  caption={Service dla \texttt{io-service} (plik \texttt{k8s/io-service/service.yaml})},
-  label={lst:service-io},
-  firstline=1,
-  lastline=15
-]{../k8s/io-service/service.yaml}
-
-\subsection{Ingress}
-
-\textit{Traefik Ingress} kieruje ruch na podstawie nazwy hosta:
-
-\lstinputlisting[
-  language=yaml,
-  caption={Ingress \textit{Traefik} (plik \texttt{k8s/ingress.yaml})},
-  label={lst:ingress},
-  firstline=1,
-  lastline=33
-]{../k8s/ingress.yaml}
+Plik \texttt{k8s/ingress.yaml} (konfiguracja \textit{Traefik Ingress} z routingiem przez hosty \texttt{*.k3s.local}) pozostaje w repozytorium jako artefakt historyczny, ale \textbf{nie jest używany} w środowisku GKE — komunikacja odbywa się bezpośrednio przez GCP LoadBalancer.
 
 \section{Infrastruktura monitorująca}
 
-\subsection{Prometheus}
+\subsection{kube-prometheus-stack — instalacja przez Helm}
 
-\textit{Prometheus} jest wdrożony w namespace \texttt{magisterka} i skonfigurowany do automatycznego wykrywania celów przez \texttt{kubernetes\_sd\_configs} z filtrowaniem po \textit{namespace} i \textit{annotation} \texttt{prometheus.io/scrape: "true"}.
+Pakiet \textit{kube-prometheus-stack} jest instalowany przez \textit{Helm} — menedżera pakietów dla \textit{Kubernetes}. Instalacja odbywa się trzema poleceniami:
 
-\subsection{Grafana}
+\begin{lstlisting}[language=bash, caption={Instalacja \textit{kube-prometheus-stack} przez Helm}, label={lst:helm-install-code}]
+# Dodanie repozytorium Helm
+helm repo add prometheus-community \
+  https://prometheus-community.github.io/helm-charts
+helm repo update
 
-\textit{Grafana} jest wdrożona z anonimowym dostępem i predefiniowanym źródłem danych \textit{Prometheus}. Dashboard ,,Magisterka — System Overview'' (UID: \texttt{magisterka-overview}) zawiera 16 paneli, odświeżanych co 10 sekund, pokazujących kluczowe metryki w czasie rzeczywistym.
+# Instalacja w namespace magisterka
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace magisterka --create-namespace \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set grafana.service.type=LoadBalancer
+\end{lstlisting}
+
+Parametr \texttt{grafana.service.type=LoadBalancer} powoduje, że \textit{Grafana} jest eksponowana przez GCP LoadBalancer, co umożliwia dostęp do dashboardów z dowolnej przeglądarki bez konieczności tunelowania.
+
+Pakiet instaluje następujące komponenty:
+\begin{itemize}
+  \item \textbf{Prometheus} — centralny system zbierania metryk, automatycznie skonfigurowany do wykrywania \textit{ServiceMonitor} i \textit{PodMonitor} w namespace \texttt{magisterka}.
+  \item \textbf{Grafana} — platforma wizualizacji z predefiniowanymi dashboardami \textit{Kubernetes}.
+  \item \textbf{kube-state-metrics} — generuje metryki o stanie obiektów \textit{Kubernetes} (Deploymenty, HPA, Pody).
+  \item \textbf{node-exporter} — zbiera metryki systemowe z węzłów.
+  \item \textbf{Prometheus Operator} — zarządza cyklem życia \textit{Prometheusa}.
+\end{itemize}
 
 \subsection{Prometheus Adapter}
 
-\textit{Prometheus Adapter} v0.12.0 implementuje \textit{Custom Metrics API}. Konfiguracja w \texttt{ConfigMap} definiuje reguły \textit{PromQL} dla metryk RPS i \textit{in-flight} dla obu serwisów badawczych:
+\textit{Prometheus Adapter} v0.12.0 implementuje \textit{Custom Metrics API}. W odróżnieniu od \textit{kube-prometheus-stack}, adapter jest wdrażany przez osobne manifesty YAML, ponieważ nie jest częścią pakietu \textit{Helm}. Konfiguracja w \texttt{ConfigMap} definiuje reguły \textit{PromQL} dla metryk RPS i \textit{in-flight} dla obu serwisów badawczych:
 
 \lstinputlisting[
   language=yaml,
   caption={Konfiguracja \textit{Prometheus Adapter} — reguły mapowania (plik \texttt{k8s/monitoring/prometheus-adapter-config.yaml})},
-  label={lst:adapter-config},
+  label={lst:adapter-config-impl},
   firstline=1,
   lastline=66
 ]{../k8s/monitoring/prometheus-adapter-config.yaml}
 
-\section{Skrypty automatyzujące}
+\subsection{Grafana — dashboard i eksport danych}
 
-\subsection{deploy-k3s.sh — wdrożenie infrastruktury}
+Dashboard ,,Magisterka — System Overview'' (UID: \texttt{magisterka-overview}) zawiera 16 paneli, odświeżanych co 10 sekund, pokazujących kluczowe metryki w czasie rzeczywistym. \textit{Grafana} jest dostępna publicznie przez GCP LoadBalancer, co umożliwia obserwację eksperymentów na żywo.
 
-Skrypt \texttt{scripts/deploy-k3s.sh} automatyzuje pełny proces wdrożenia:
-
+Dla każdego scenariusza testowego z \textit{Grafany} eksportowanych jest 5 zestawów danych CSV (poprzez \textit{Grafana render API} lub ręczny eksport):
 \begin{enumerate}
-  \item \textbf{Budowanie obrazów Docker} — buduje obrazy dla \texttt{cpu-service}, \texttt{io-service} i \texttt{echo-server}.
-  \item \textbf{Import do containerd k3s} — importuje obrazy do \textit{containerd} k3s przez \texttt{k3s ctr image import} (lub przez socket \texttt{containerd.sock}).
-  \item \textbf{Nakładanie manifestów} — tworzy namespace, wdraża monitoring (\textit{Prometheus}, \textit{Grafana}, \textit{Prometheus Adapter}), serwisy aplikacyjne z HPA, echo-server i \textit{Ingress}.
-  \item \textbf{Oczekiwanie na gotowość} — monitoruje \texttt{rollout status} dla każdego \textit{Deploymentu} (timeout 120\,s).
+  \item \texttt{replicas.csv} — HPA-controlled pod count over time.
+  \item \texttt{cpu\_mcpu.csv} — CPU usage per pod in millicores.
+  \item \texttt{memory\_mb.csv} — Memory usage per pod in megabytes.
+  \item \texttt{rps.csv} — Requests per second over time.
+  \item \texttt{latency\_ms.csv} — Response latency over time (p50, p95, p99).
 \end{enumerate}
 
-Skrypt obsługuje podkomendy: \texttt{deploy} (pełny proces), \texttt{build-only}, \texttt{apply-only}, \texttt{clean}, \texttt{status}.
+\section{Skrypty automatyzujące}
 
 \subsection{run-tests.sh — orkiestracja testów}
 
-Skrypt \texttt{scripts/run-tests.sh} (\~{}780 linii) automatyzuje wykonanie wszystkich 8 scenariuszy badawczych:
+Skrypt \texttt{scripts/run-tests.sh} ($\sim$780 linii) automatyzuje wykonanie wszystkich 8 scenariuszy badawczych. W środowisku GKE skrypt działa na maszynie \texttt{k6-generator} (\textit{Compute Engine}), która ma skonfigurowany dostęp do klastra GKE przez \texttt{kubectl}:
 
 \begin{enumerate}
-  \item \textbf{Port-forward} — uruchamia \texttt{kubectl port-forward} dla \texttt{cpu-service} (localhost:8080) i \texttt{io-service} (localhost:8081), weryfikuje health check.
+  \item \textbf{Sprawdzenie wymagań} — weryfikacja dostępności \texttt{kubectl} i \texttt{k6}.
   \item \textbf{Pętla scenariuszy} — dla każdego z 8 scenariuszy:
     \begin{enumerate}
       \item Przełącza HPA na odpowiednią strategię (funkcja \texttt{switch\_hpa}).
       \item Resetuje \textit{Deployment} do 1 repliki (funkcja \texttt{reset\_deployment}).
-      \item Uruchamia test \textit{k6} 5-krotnie (zmienna \texttt{REPETITIONS=5}).
+      \item Uruchamia test \textit{k6} 5-krotnie (zmienna \texttt{REPETITIONS=5}), z ruchem kierowanym na adresy IP GCP LoadBalancer przez \texttt{options.hosts}.
       \item Zapisuje wyniki do \texttt{results/<scenario>/}.
     \end{enumerate}
   \item \textbf{Cooldown} — po każdym scenariuszu: skaluje oba serwisy do 1 repliki, usuwa wszystkie HPA, czeka 120 sekund na stabilizację.
-  \item \textbf{Sprzątanie} — zatrzymuje port-forward.
 \end{enumerate}
 
 \lstinputlisting[
@@ -334,13 +347,13 @@ Skrypt \texttt{scripts/run-tests.sh} (\~{}780 linii) automatyzuje wykonanie wszy
   lastline=220
 ]{../scripts/run-tests.sh}
 
-\subsection{run-all.sh — pełny pipeline}
+\subsection{Uwaga o skryptach legacy}
 
-Skrypt \texttt{scripts/run-all.sh} łączy wdrożenie i testy w jednym wywołaniu: najpierw uruchamia \texttt{deploy-k3s.sh}, a następnie \texttt{run-tests.sh all}.
+W repozytorium znajdują się również skrypty \texttt{deploy-k3s.sh} oraz \texttt{run-all.sh}, które były przewidziane dla lokalnego środowiska \textit{k3s}. Skrypty te \textbf{nie są wykorzystywane} w środowisku GKE — wdrożenie na GKE odbywa się przez \texttt{kubectl apply} dla manifestów \textit{Kubernetes} oraz \texttt{helm install} dla \textit{kube-prometheus-stack}. Skrypty pozostają w repozytorium jako artefakty fazy projektowej.
 
 \section{Scenariusze testowe k6}
 
-Każdy skrypt \textit{k6} definiuje scenariusze obciążeniowe oraz progi akceptacji (\textit{thresholds}):
+Każdy skrypt \textit{k6} definiuje scenariusze obciążeniowe, progi akceptacji (\textit{thresholds}) oraz mapowanie hostów (\texttt{options.hosts}) dla adresów IP GCP LoadBalancer:
 
 \subsection{cpu-load-test.js}
 
@@ -374,11 +387,13 @@ Każdy skrypt \textit{k6} definiuje scenariusze obciążeniowe oraz progi akcept
 
 \section{Podsumowanie implementacji}
 
-Zaimplementowany system badawczy składa się z czterech mikroserwisów (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}, \texttt{memory-service}), infrastruktury monitorującej (\textit{Prometheus}, \textit{Grafana}, \textit{Prometheus Adapter}) oraz zestawu skryptów automatyzujących wdrożenie i testy. Kluczowe cechy implementacji:
+Zaimplementowany system badawczy składa się z czterech mikroserwisów (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}, \texttt{memory-service}), infrastruktury monitorującej opartej na \textit{kube-prometheus-stack} (Helm) oraz zestawu skryptów automatyzujących testy. Kluczowe cechy implementacji:
 
 \begin{itemize}
-  \item \textbf{Pełna automatyzacja} — od budowy obrazów przez wdrożenie na k3s po wykonanie wszystkich scenariuszy testowych.
+  \item \textbf{Środowisko GCP/GKE} — całość infrastruktury działa na zarządzanym klastrze \textit{Google Kubernetes Engine}, z serwisami eksponowanymi przez GCP LoadBalancer i maszyną \textit{Compute Engine} jako generatorem obciążenia.
+  \item \textbf{Monitoring przez kube-prometheus-stack} — instalacja przez \textit{Helm} zapewnia spójny, automatycznie skonfigurowany stos monitorujący bez ręcznych manifestów.
+  \item \textbf{Pełna automatyzacja} — skrypt \texttt{run-tests.sh} orkiestruje wszystkie 8 scenariuszy z 5-krotnym powtórzeniem, z automatycznym przełączaniem HPA i cooldownem.
   \item \textbf{Powtarzalność} — każdy scenariusz testowy jest uruchamiany 5-krotnie, z cooldownem między scenariuszami.
-  \item \textbf{Odtwarzalność} — wszystkie manifesty są deklaratywne i niezależne od konkretnego klastra \textit{Kubernetes}.
-  \item \textbf{Obserwowalność} — metryki zbierane przez \textit{Prometheusa} i wizualizowane w \textit{Grafanie} umożliwiają szczegółową analizę zachowania systemu pod obciążeniem.
+  \item \textbf{Odtwarzalność} — wszystkie manifesty są deklaratywne i mogą być odtworzone na dowolnym klastrze GKE.
+  \item \textbf{Obserwowalność} — metryki zbierane przez \textit{Prometheusa} i wizualizowane w \textit{Grafanie} (dostępnej publicznie przez LoadBalancer), z eksportem 5 zestawów CSV na scenariusz.
 \end{itemize}

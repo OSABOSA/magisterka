@@ -45,7 +45,7 @@ System składa się z trzech mikroserwisów — dwóch podlegających badaniu (\
 
 \begin{itemize}
   \item \texttt{POST /process} — przetwarzanie obrazu: akceptuje plik graficzny (\textit{multipart form}), wykonuje sekwencję operacji CPU-intensywnych z użyciem biblioteki \textit{Pillow} (m.in. konwersja do skali szarości, filtr \texttt{BLUR}, filtr \texttt{SHARPEN}, filtr \texttt{FIND\_EDGES}, ekstrakcja kanałów RGB, resize), oblicza entropię Shannona dla każdego kanału, zwraca statystyki przetwarzania (wymiary, entropia, czas).
-  \item \texttt{GET /fibonacci} — obliczanie $n$-tej liczby Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^{n})$. Parametr $n$ jest konfigurowalny (domyślnie $n = 30$).
+  \item \texttt{GET /fibonacci} — obliczanie $n$-tej liczby Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^{n})$. Parametr $n$ jest konfigurowalny (domyślnie $n = 25$).
 \end{itemize}
 
 Obie operacje są czysto CPU-intensywne — nie wykonują operacji sieciowych ani dyskowych poza odbiorem żądania i wysłaniem odpowiedzi. Dzięki temu zużycie CPU silnie koreluje z obciążeniem żądaniami.
@@ -90,15 +90,13 @@ Dla każdej aplikacji badawczej zdefiniowano trzy warianty \textit{HorizontalPod
 
 Strategia oparta na zużyciu CPU — HPA monitoruje średnie zużycie procesora jako procent \textit{resource request} dla wszystkich Podów w \textit{Deploymencie}. Wartość progowa: 50\%. Oznacza to, że jeśli średnie zużycie CPU przekracza 50\% \texttt{requests} (czyli 125\,m dla cpu-service, 50\,m dla io-service), HPA dodaje repliki.
 
-\begin{lstlisting}[language=yaml, caption={Konfiguracja HPA CPU dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-cpu.yaml})}, label={lst:hpa-cpu-config}]
-metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 50
-\end{lstlisting}
+\lstinputlisting[
+  language=yaml,
+  caption={Konfiguracja HPA CPU dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-cpu.yaml})},
+  label={lst:hpa-cpu-config},
+  firstline=1,
+  lastline=22
+]{../k8s/cpu-service/hpa-cpu.yaml}
 
 Strategia CPU jest najczęściej stosowaną i domyślnie rekomendowaną w ekosystemie \textit{Kubernetes}. Jej skuteczność zależy od tego, czy zużycie CPU koreluje z obciążeniem aplikacji.
 
@@ -106,15 +104,13 @@ Strategia CPU jest najczęściej stosowaną i domyślnie rekomendowaną w ekosys
 
 Strategia oparta na zużyciu pamięci — HPA monitoruje średnie zużycie pamięci jako procent \textit{resource request}. Wartość progowa: 70\%. Strategia ta jest rzadziej stosowana, ponieważ większość aplikacji alokuje pamięć w sposób nieelastyczny (po uruchomieniu lub przy pierwszym żądaniu), co sprawia, że metryka pamięci nie odzwierciedla bieżącego obciążenia.
 
-\begin{lstlisting}[language=yaml, caption={Konfiguracja HPA Memory dla \texttt{io-service} (plik \texttt{k8s/io-service/hpa-memory.yaml})}, label={lst:hpa-memory-config}]
-metrics:
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 70
-\end{lstlisting}
+\lstinputlisting[
+  language=yaml,
+  caption={Konfiguracja HPA Memory dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-memory.yaml})},
+  label={lst:hpa-memory-config},
+  firstline=1,
+  lastline=23
+]{../k8s/cpu-service/hpa-memory.yaml}
 
 Hipoteza badawcza przewiduje, że HPA Memory będzie nieskuteczne dla obu profili obciążeniowych — ani CPU-bound, ani I/O-bound nie powinny generować istotnych wahań zużycia pamięci skorelowanych z ruchem.
 
@@ -122,33 +118,103 @@ Hipoteza badawcza przewiduje, że HPA Memory będzie nieskuteczne dla obu profil
 
 Strategia oparta na niestandardowej metryce \texttt{http\_requests\_per\_second} — liczbie żądań HTTP na sekundę na Pod. Metryka jest dostarczana przez \textit{prometheus-adapter}, który transformuje liczniki \textit{Prometheusa} (\texttt{cpu\_service\_http\_requests\_total}, \texttt{io\_service\_http\_requests\_total}) na chwilową wartość RPS za pomocą funkcji \texttt{rate()\lbrack{}1m\rbrack{}}. Wartość progowa: 100 żądań na sekundę na Pod.
 
-\begin{lstlisting}[language=yaml, caption={Konfiguracja HPA Custom RPS (plik \texttt{k8s/cpu-service/hpa-custom.yaml})}, label={lst:hpa-custom-config}]
-metrics:
-  - type: Pods
-    pods:
-      metric:
-        name: http_requests_per_second
-      target:
-        type: AverageValue
-        averageValue: "100"
-\end{lstlisting}
+\lstinputlisting[
+  language=yaml,
+  caption={Konfiguracja HPA Custom RPS (plik \texttt{k8s/cpu-service/hpa-custom.yaml})},
+  label={lst:hpa-custom-config},
+  firstline=1,
+  lastline=24
+]{../k8s/cpu-service/hpa-custom.yaml}
 
 Strategia RPS jest bezpośrednio powiązana z obciążeniem żądaniami — niezależnie od tego, czy żądania są CPU-intensywne, czy I/O-intensywne, liczba żądań na sekundę rośnie proporcjonalnie do ruchu. Dzięki temu HPA Custom RPS powinna być skuteczna dla obu profili obciążeniowych.
 
+\section{Architektura wdrożeniowa w GCP}
+
+\subsection{Topologia sieciowa GCP}
+
+System badawczy jest w całości wdrożony w środowisku \textit{Google Cloud Platform} (GCP). Wszystkie komponenty znajdują się w jednej sieci \textit{Virtual Private Cloud} (VPC), co zapewnia niskie opóźnienia i bezpieczną komunikację wewnętrzną:
+
+\begin{figure}[H]
+  \centering
+  % Opis architektury w formie diagramu tekstowego (TikZ może być dodany później)
+  \begin{verbatim}
+  +--------------------------------------------------+
+  |                GCP VPC Network                    |
+  |                                                   |
+  |  +------------------+    +---------------------+  |
+  |  |  k6-generator    |    |   GKE Cluster       |  |
+  |  |  (Compute Engine)|    |                     |  |
+  |  |                  |    |  +---------------+  |  |
+  |  |  k6 -> LB IP     |--->|  | LoadBalancer  |  |  |
+  |  |  (hosts mapping) |    |  +-------+-------+  |  |
+  |  |                  |    |          |          |  |
+  |  +------------------+    |  +-------v-------+  |  |
+  |                          |  | cpu-service   |  |  |
+  |                          |  | io-service    |  |  |
+  |                          |  | echo-server   |  |  |
+  |                          |  +---------------+  |  |
+  |                          |                     |  |
+  |                          |  kube-prometheus-   |  |
+  |                          |  stack (Helm)       |  |
+  |                          |  +---------------+  |  |
+  |                          |  | Prometheus    |  |  |
+  |                          |  | Grafana (LB)  |  |  |
+  |                          |  +---------------+  |  |
+  |                          +---------------------+  |
+  +--------------------------------------------------+
+  \end{verbatim}
+  \caption{Topologia systemu badawczego w GCP — wszystkie komponenty w jednej sieci VPC}
+  \label{fig:gcp-topology}
+\end{figure}
+
+\subsection{GKE Cluster — klaster Kubernetes}
+
+Klaster GKE jest centrum systemu badawczego. Wszystkie aplikacje, HPA, monitoring i \textit{prometheus-adapter} działają jako zasoby \textit{Kubernetes} w namespace \texttt{magisterka}. Klaster składa się z węzłów typu \texttt{e2-standard-4} (4 vCPU, 16\,GB RAM), które zapewniają wystarczające zasoby dla maksymalnie 20 Podów aplikacyjnych (przy \texttt{maxReplicas=10} dla obu serwisów) plus Podów monitorujących.
+
+\subsection{GCP LoadBalancer — ekspozycja serwisów}
+
+Każdy serwis aplikacyjny (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}) jest eksponowany jako \texttt{Service} typu \texttt{LoadBalancer}. GKE automatycznie tworzy zewnętrzny \textit{GCP LoadBalancer} (Layer 4, TCP) i przydziela mu publiczny adres IP. Ruch z maszyny \texttt{k6-generator} trafia bezpośrednio na te adresy IP.
+
+Dodatkowo, \textit{Grafana} (część \textit{kube-prometheus-stack}) jest również eksponowana przez \texttt{LoadBalancer}, co umożliwia obserwację eksperymentów w czasie rzeczywistym z dowolnej przeglądarki.
+
+\subsection{k6-generator — maszyna generująca obciążenie}
+
+Dedykowana maszyna \textit{Compute Engine} (\texttt{k6-generator}) w tej samej sieci VPC uruchamia skrypty \textit{k6}. Mapowanie nazw serwisów na adresy IP \textit{LoadBalancer} odbywa się przez mechanizm \texttt{options.hosts} w skryptach \textit{k6} — bez konieczności konfiguracji DNS:
+
+\begin{lstlisting}[language=javascript, caption={Mapowanie hostów w skrypcie \textit{k6} — zamiast DNS}, label={lst:k6-hosts-arch}]
+export const options = {
+  hosts: {
+    'cpu-service': '34.118.71.122',    // GCP LoadBalancer IP
+    'io-service': '35.204.93.45',      // GCP LoadBalancer IP
+  },
+  scenarios: { ... }
+};
+\end{lstlisting}
+
+To rozwiązanie eliminuje potrzebę konfiguracji serwera DNS, rekordów \texttt{/etc/hosts} czy tunelowania przez \texttt{kubectl port-forward}. Ruch sieciowy między \texttt{k6-generator} a Podami w GKE przechodzi przez GCP LoadBalancer, który dystrybuuje go do zdrowych Podów.
+
+\subsection{Rejestr obrazów kontenerowych}
+
+Obrazy Docker są przechowywane w \textit{GCP Artifact Registry}, skąd są pobierane przez GKE podczas wdrażania. Eliminuje to konieczność ręcznego importowania obrazów do \textit{container runtime} na każdym węźle — GKE automatycznie pobiera obrazy z rejestru na podstawie pola \texttt{image} w \textit{Deploymencie}.
+
 \section{Infrastruktura monitorująca}
 
-\subsection{Prometheus}
+\subsection{kube-prometheus-stack}
 
-\textit{Prometheus} pełni rolę centralnego systemu zbierania metryk. Jest skonfigurowany do scrapowania:
+Pakiet \textit{kube-prometheus-stack} jest instalowany przez \textit{Helm} i dostarcza kompletny stos monitorujący:
 
 \begin{itemize}
-  \item \textbf{Metryk infrastrukturalnych} — z \texttt{kubernetes-sd} (CPU, RAM, liczba replik, stan Podów) co 15 sekund.
-  \item \textbf{Metryk aplikacyjnych} — z endpointów \texttt{/metrics} wystawianych przez \texttt{cpu-service}, \texttt{io-service} i \texttt{echo-server} (RPS, czas przetwarzania, liczba aktywnych zapytań, metryki niestandardowe).
+  \item \textbf{Prometheus} — zbiera metryki infrastrukturalne (przez \texttt{kube-state-metrics}, \texttt{node-exporter}, \texttt{cAdvisor}) oraz aplikacyjne (z endpointów \texttt{/metrics} serwisów) co 15 sekund.
+  \item \textbf{Grafana} — udostępnia dashboardy wizualizacyjne, eksponowana publicznie przez GCP LoadBalancer dla obserwacji eksperymentów w czasie rzeczywistym.
+  \item \textbf{kube-state-metrics} — generuje metryki o stanie obiektów \textit{Kubernetes}: Deploymenty, HPA, Pody.
+  \item \textbf{node-exporter} — zbiera metryki systemowe z węzłów (CPU, pamięć, dysk, sieć).
 \end{itemize}
 
-\subsection{Grafana}
+\textit{Prometheus Operator} zarządza cyklem życia \textit{Prometheusa} i automatycznie konfiguruje \textit{scraping} na podstawie obiektów \textit{ServiceMonitor} i \textit{PodMonitor}. Aplikacje badawcze są automatycznie wykrywane dzięki adnotacjom \texttt{prometheus.io/scrape: "true"} na Podach.
 
-\textit{Grafana} udostępnia dashboard ,,Magisterka — System Overview'' zawierający 16 paneli wizualizujących kluczowe metryki systemu w czasie rzeczywistym (odświeżanie co 10 sekund):
+\subsection{Grafana — dashboard i eksport danych}
+
+\textit{Grafana} udostępnia autorski dashboard ,,Magisterka — System Overview'' zawierający panele wizualizujące kluczowe metryki systemu w czasie rzeczywistym:
 
 \begin{itemize}
   \item RPS dla \texttt{cpu-service} i \texttt{io-service} (panele typu \texttt{stat} z miniwykresem).
@@ -159,6 +225,18 @@ Strategia RPS jest bezpośrednio powiązana z obciążeniem żądaniami — niez
   \item Liczba żądań w toku (\textit{in-flight}).
   \item Stan HPA (pożądana vs. aktualna liczba replik).
 \end{itemize}
+
+Dla każdego z 8 scenariuszy testowych eksportowanych jest 5 zestawów danych CSV z \textit{Grafany}:
+
+\begin{enumerate}
+  \item \texttt{replicas.csv} — liczba replik HPA w czasie.
+  \item \texttt{cpu\_mcpu.csv} — zużycie CPU per Pod w milijednostkach (mCPU).
+  \item \texttt{memory\_mb.csv} — zużycie pamięci per Pod w megabajtach.
+  \item \texttt{rps.csv} — przepustowość (RPS) w czasie.
+  \item \texttt{latency\_ms.csv} — opóźnienia odpowiedzi w czasie (p50, p95, p99).
+\end{enumerate}
+
+Eksporty te, wraz z wynikami \textit{k6} (JSON + tekstowe podsumowanie), stanowią kompletny zbiór danych dla każdego scenariusza.
 
 \subsection{Prometheus Adapter}
 
@@ -173,19 +251,18 @@ Strategia RPS jest bezpośrednio powiązana z obciążeniem żądaniami — niez
 
 Reguły mapowania wykorzystują mechanizm \texttt{<<.LabelMatchers>>} i \texttt{<<.GroupBy>>} do dynamicznego filtrowania po namespace i Podzie, co jest wymagane przez \textit{Custom Metrics API}.
 
-\section{Topologia wdrożeniowa}
+\section{Topologia zasobów Kubernetes}
 
 Wszystkie komponenty systemu są wdrażane w pojedynczym \textit{namespace} \texttt{magisterka}. Topologia obejmuje:
 
 \begin{itemize}
   \item \textbf{3 Deploymenty} aplikacyjne: \texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server} (plus opcjonalnie \texttt{memory-service}).
-  \item \textbf{3 Serwisy} typu \texttt{ClusterIP}: każdy kieruje ruch na port 80 do \texttt{targetPort 8000} odpowiedniego \textit{Deploymentu}.
+  \item \textbf{3 Serwisy} typu \texttt{LoadBalancer}: każdy kieruje ruch na port 80 do \texttt{targetPort 8000} odpowiedniego \textit{Deploymentu}, eksponując serwis przez GCP LoadBalancer.
   \item \textbf{6 HPA} (po 3 na serwis badawczy): pliki \texttt{hpa-cpu.yaml}, \texttt{hpa-memory.yaml}, \texttt{hpa-custom.yaml}.
-  \item \textbf{Monitoring}: \texttt{prometheus} + \texttt{grafana} + \texttt{prometheus-adapter} w tym samym namespace.
-  \item \textbf{Ingress} (\textit{Traefik}): routing na podstawie nazwy hosta (\texttt{cpu-magisterka.k3s.local} $\rightarrow$ \texttt{cpu-service}, \texttt{io-magisterka.k3s.local} $\rightarrow$ \texttt{io-service}).
+  \item \textbf{Monitoring}: \textit{kube-prometheus-stack} (Prometheus + Grafana + kube-state-metrics + node-exporter) + \texttt{prometheus-adapter}.
 \end{itemize}
 
-W środowisku testowym ruch z \textit{k6} do serwisów jest kierowany przez \texttt{kubectl port-forward}, co eliminuje potrzebę zewnętrznego \textit{LoadBalancera} i zapewnia minimalne opóźnienie sieciowe ($<1$\,ms, lokalny \texttt{localhost}).
+W środowisku testowym ruch z \textit{k6} do serwisów jest kierowany przez GCP LoadBalancer na podstawie mapowania \texttt{options.hosts}. Opóźnienie sieciowe między maszyną \texttt{k6-generator} a Podami w GKE wynosi $\sim$1--5\,ms (komunikacja wewnątrz tej samej strefy VPC).
 
 \subsection{Zasoby przydzielone serwisom}
 
@@ -226,13 +303,13 @@ Eksperyment obejmuje 8 scenariuszy uruchamianych sekwencyjnie:
 
 \subsection{Procedura eksperymentalna}
 
-Każdy scenariusz jest wykonywany według ściśle określonej procedury, zaimplementowanej w skrypcie \texttt{scripts/run-tests.sh}:
+Każdy scenariusz jest wykonywany według ściśle określonej procedury:
 
 \begin{enumerate}
-  \item \textbf{Przełączenie HPA} — usunięcie wszystkich istniejących HPA dla docelowego serwisu i nałożenie pliku HPA odpowiadającego testowanej strategii.
+  \item \textbf{Przełączenie HPA} — usunięcie wszystkich istniejących HPA dla docelowego serwisu i nałożenie pliku HPA odpowiadającego testowanej strategii (przez \texttt{kubectl apply}).
   \item \textbf{Reset Deploymentu} — skalowanie \textit{Deploymentu} do 1 repliki i oczekiwanie na gotowość (\texttt{rollout status}).
-  \item \textbf{Uruchomienie testu k6} — wykonanie właściwego skryptu obciążeniowego.
-  \item \textbf{Zapis wyników} — wyniki k6 (JSON + tekstowe podsumowanie) zapisywane do katalogu \texttt{results/<scenariusz>/}.
+  \item \textbf{Uruchomienie testu k6} — wykonanie skryptu obciążeniowego z maszyny \texttt{k6-generator}, ruch kierowany na adres IP GCP LoadBalancer przez mapowanie \texttt{options.hosts}.
+  \item \textbf{Zapis wyników} — wyniki k6 (JSON + tekstowe podsumowanie) zapisywane do katalogu \texttt{results/<scenariusz>/}, wraz z 5 eksportami CSV z \textit{Grafany}.
   \item \textbf{Powtórzenie} — kroki 1--4 powtarzane 5-krotnie dla każdego scenariusza.
   \item \textbf{Cooldown} — po każdym scenariuszu: skalowanie obu serwisów do 1 repliki, usunięcie wszystkich HPA, odczekanie 120 sekund na stabilizację klastra.
 \end{enumerate}
@@ -244,14 +321,14 @@ Każdy scenariusz wykorzystuje dedykowany skrypt \textit{k6} dopasowany do profi
 \textbf{CPU-bound} (skrypt \texttt{cpu-load-test.js}):
 \begin{itemize}
   \item \textbf{Scenariusz Fibonacci}: ramp-up od 1 do 50 VU w ciągu 60 sekund, następnie stałe obciążenie 50 VU przez 120 sekund.
-  \item \textbf{Scenariusz przetwarzanie obrazu}: stałe 10 VU przez 180 sekund, każde żądanie wysyła losowo wygenerowany obraz PNG ($100 \times 100$ pikseli) do \texttt{POST /process}.
+  \item \textbf{Scenariusz przetwarzanie obrazu}: stałe 10 VU przez 180 sekund, każde żądanie wysyła losowo wygenerowany obraz PNG ($400 \times 300$ pikseli) do \texttt{POST /process}.
 \end{itemize}
 
 \textbf{I/O-bound} (skrypt \texttt{io-load-test.js}):
 \begin{itemize}
-  \item \textbf{Scenariusz stałych zapytań}: ramp-up od 1 do 100 VU w ciągu 60 sekund, stałe obciążenie przez 120 sekund, \texttt{delay=100\,ms}, \texttt{steps=3}.
-  \item \textbf{Scenariusz stres-test}: stałe 20 VU, \texttt{delay} rosnący od 50\,ms do 2000\,ms w krokach co 30 sekund.
-  \item \textbf{Scenariusz wywołań zewnętrznych}: stałe 20 VU, \texttt{external\_call=true}, żądania do \texttt{GET /upstream}.
+  \item \textbf{Scenariusz stałych zapytań}: ramp-up od 1 do 100 VU w ciągu 120 sekund, stałe obciążenie przez 180 sekund, \texttt{delay=200\,ms}, \texttt{steps=3}.
+  \item \textbf{Scenariusz stres-test}: stałe 30 VU, \texttt{delay} rosnący od 50\,ms do 2000\,ms w krokach co 120 sekund.
+  \item \textbf{Scenariusz wywołań zewnętrznych}: stałe 20 VU, \texttt{external\_call=true}, żądania do \texttt{GET /query}.
 \end{itemize}
 
 \textbf{Scenariusz łączony} (skrypt \texttt{combined-scenario.js}):
@@ -273,17 +350,30 @@ Dla każdego scenariusza zbierane są następujące metryki:
   \item \textbf{Czas do skalowania (\textit{time-to-scale})} — czas od przekroczenia progu HPA do osiągnięcia docelowej liczby replik.
   \item \textbf{Efektywność skalowania (\textit{scaling efficiency})} — stosunek zmiany przepustowości do zmiany liczby replik.
   \item \textbf{Stopa błędów (\textit{error rate})} — odsetek żądań zakończonych kodem HTTP $\geq 400$.
-  \item \textbf{Liczba replik w czasie} — przebieg czasowy skalowania (dane z \textit{Prometheusa}).
-  \item \textbf{Zużycie CPU i pamięci} — średnie i szczytowe zużycie zasobów na Pod.
+  \item \textbf{Liczba replik w czasie} — przebieg czasowy skalowania (dane z \textit{Prometheusa} przez \textit{Grafana} CSV).
+  \item \textbf{Zużycie CPU i pamięci} — średnie i szczytowe zużycie zasobów na Pod (dane z \textit{Grafana} CSV).
 \end{itemize}
+
+\subsection{Analiza zjawisk anomalnych}
+
+W trakcie eksperymentów szczególna uwaga zostanie poświęcona trzem zjawiskom przejściowym, które mają istotny wpływ na zachowanie systemów \textit{SaaS} w środowisku chmurowym:
+
+\begin{enumerate}
+  \item \textbf{HPA Lag} (opóźnienie reakcji autoskalera) — opóźnienie $\sim$60--90 sekund między przekroczeniem progu metryki a faktycznym utworzeniem nowych Podów. Wynika ono z sumy: czasu scrapowania metryk przez \textit{Prometheusa} (15\,s) + czasu odświeżenia HPA (15\,s) + czasu tworzenia Podów i osiągnięcia gotowości. W tym okresie istniejące Pody są przeciążone, co może prowadzić do degradacji wydajności.
+  
+  \item \textbf{Cold Start Latency} (opóźnienie zimnego startu Podów) — nowo utworzone Pody potrzebują 15--30 sekund na osiągnięcie gotowości (pobranie obrazu z rejestru, uruchomienie kontenera, zaliczenie \textit{readiness probe}). W tym oknie czasowym ruch jest już dystrybuowany do nowych Podów przez \textit{LoadBalancer}, co powoduje podwyższone opóźnienia percentyla P99 lub błędy HTTP 502/503.
+  
+  \item \textbf{CPU Throttling Cascade} (kaskadowe błędy przy \textit{CPU throttlingu}) — gdy Pody osiągają limit CPU podczas gwałtownego wzrostu ruchu, mechanizm \textit{CPU throttling} w jądrze Linux (\textit{CFS bandwidth control}) ogranicza czas procesora. Powoduje to kolejkowanie żądań $\rightarrow$ wzrost czasu odpowiedzi $\rightarrow$ \textit{timeouty} w \textit{k6} (\texttt{dial: i/o timeout}) $\rightarrow$ błędy HTTP 502. Zjawisko to ma charakter kaskadowy, ponieważ HPA nie zdążył jeszcze dodać nowych replik (efekt \textit{HPA Lag}), tworząc ,,spiralę śmierci'', która ustępuje dopiero po osiągnięciu gotowości przez nowe Pody.
+\end{enumerate}
 
 \section{Podsumowanie architektury}
 
-Zaprojektowany system badawczy umożliwia kontrolowane, powtarzalne eksperymenty porównujące skuteczność trzech strategii HPA dla dwóch profili obciążeniowych. Kluczowe decyzje architektoniczne:
+Zaprojektowany system badawczy umożliwia kontrolowane, powtarzalne eksperymenty porównujące skuteczność trzech strategii HPA dla dwóch profili obciążeniowych w środowisku GCP/GKE. Kluczowe decyzje architektoniczne:
 
 \begin{enumerate}
-  \item \textbf{Izolacja zmiennych} — każdy scenariusz testuje dokładnie jedną kombinację (profil $\times$ strategia), przy wyizolowanym serwisie (port-forward) i ustabilizowanym klastrze (cooldown).
+  \item \textbf{Izolacja zmiennych} — każdy scenariusz testuje dokładnie jedną kombinację (profil $\times$ strategia), przy wyizolowanym generatorze obciążenia (osobna VM \textit{Compute Engine}) i ustabilizowanym klastrze (cooldown).
   \item \textbf{Powtarzalność} — każdy scenariusz jest powtarzany 5-krotnie, co umożliwia analizę statystyczną i eliminację wpływu anomalii.
-  \item \textbf{Automatyzacja} — cały proces (przełączanie HPA, reset Deploymentów, uruchamianie k6, zbieranie wyników) jest w pełni zautomatyzowany przez skrypt \texttt{run-tests.sh}.
-  \item \textbf{Odtwarzalność} — wszystkie manifesty \textit{Kubernetes}, skrypty k6 i konfiguracje są przechowywane w repozytorium, co umożliwia odtworzenie środowiska na dowolnym klastrze \textit{Kubernetes}.
+  \item \textbf{Automatyzacja} — cały proces (przełączanie HPA, reset Deploymentów, uruchamianie k6, zbieranie wyników, eksport CSV z Grafany) jest zautomatyzowany przez skrypt \texttt{run-tests.sh}.
+  \item \textbf{Odtwarzalność} — wszystkie manifesty \textit{Kubernetes}, skrypty k6 i konfiguracje są przechowywane w repozytorium, co umożliwia odtworzenie środowiska na dowolnym klastrze GKE.
+  \item \textbf{Realizm wdrożeniowy} — wykorzystanie GCP LoadBalancer zamiast \texttt{port-forward} oraz dedykowanej maszyny \textit{Compute Engine} dla \textit{k6} odzwierciedla rzeczywiste warunki produkcyjne.
 \end{enumerate}
