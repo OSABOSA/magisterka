@@ -1,289 +1,53 @@
-% =============================================================================
-% Rozdział 3: Projekt architektury systemu badawczego
-% =============================================================================
-\chapter{Projekt architektury systemu badawczego}
+\chapter{Projekt architektury systemu i metodologia badań}
+\label{ch:projekt_architektury}
 
-Rozdział niniejszy opisuje projekt architektury systemu badawczego — jego komponenty, strategie skalowania, infrastrukturę monitorującą oraz plan eksperymentów. Wszystkie decyzje projektowe zostały podporządkowane celowi badawczemu: porównaniu skuteczności trzech strategii \textit{HorizontalPodAutoscaler} (\textit{HPA}) dla dwóch diametralnie różnych profili obciążeniowych.
+Rozdział ten zawiera szczegółowy opis założeń architektonicznych systemu badawczego, macierzy eksperymentalnej oraz infrastruktury sieciowej wdrożonej w środowisku chmury publicznej. Każda decyzja projektowa została podporządkowana celowi głównemu: empirycznej analizie skuteczności mechanizmów HPA w konfrontacji ze skrajnie odmiennymi profilami obciążeniowymi aplikacji SaaS.
 
-\section{Macierz badawcza}
+\section{Chmurowa topologia sieciowa infrastruktury badawczej}
+\label{sec:topologia_sieciowa}
+W celu zagwarantowania pełnej separacji procesów pomiarowych i eliminacji wpływu narzutu sieciowego na wyniki testów, środowisko badawcze zrealizowano w całości w ramach dedykowanej sieci chmurowej \textit{Virtual Private Cloud (VPC)} w regionie \texttt{europe-west3} (Frankfurt). Infrastrukturę podzielono na dwie odizolowane strefy obliczeniowe połączone wewnętrznym, niskopoziomowym routingem chmurowym:
 
-Podstawą metodologii badawczej jest macierz $2 \times 3$ obejmująca dwie aplikacje o odmiennych profilach obciążeniowych i trzy strategie HPA:
+\begin{enumerate}
+    \item \textbf{Strefa Generatora Ruchu (Pomiarowa):} Obejmuje niezależną instancję maszyny wirtualnej \textit{Compute Engine} o nazwie \texttt{k6-generator} (typ \texttt{e2-standard-4}, 4 vCPU, 16 GB RAM). Maszyna ta realizuje wyłącznie zadania wykonywania skryptów obciążeniowych \textit{k6}. Odizolowanie generatora od klastra orkiestracji zapobiega podkradaniu cykli procesora (ang. \textit{CPU stealing}) mikroserwisom aplikacyjnym.
+    \item \textbf{Strefa Środowiska SaaS (Monitorowana):} Obejmuje zarządzany klaster GKE, na którym uruchomiono badane aplikacje oraz stos monitorujący. Komunikacja wejściowa do mikroserwisów realizowana jest poprzez przypisanie do obiektów \texttt{Service} zewnętrznych, chmurowych Load Balancerów GCP dysponujących statycznymi adresami IP.
+\end{enumerate}
 
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Profil aplikacji} & \textbf{HPA CPU (50\%)} & \textbf{HPA Memory (70\%)} & \textbf{HPA Custom RPS (100/Pod)} \\
-    \hline
-    \textit{CPU-bound} (cpu-service) & \texttt{cpu-cpu} & \texttt{cpu-memory} & \texttt{cpu-custom} \\
-    \hline
-    \textit{I/O-bound} (io-service) & \texttt{io-cpu} & \texttt{io-memory} & \texttt{io-custom} \\
-    \hline
-  \end{tabularx}
-  \caption{Macierz badawcza $2 \times 3$ — identyfikatory scenariuszy testowych}
-  \label{tab:research-matrix}
+\section{Projekt specyfikacji mikroserwisów aplikacyjnych}
+\label{sec:projekt_mikroserwisow}
+System badawczy składa się z trzech odrębnych, odizolowanych mikroserwisów zaimplementowanych przy użyciu asynchronicznego frameworka \textit{FastAPI (Python 3.12)}. Każda z usług została zaprojektowana w taki sposób, aby reprezentować czysty profil obciążeniowy:
+
+\subsection{Serwis obliczeniowy (cpu-service) -- Profil CPU-bound}
+\label{subsec:cpu_service_spec}
+Serwis implementuje endpointy realizujące zadania intensywne obliczeniowo. Głównym punktem testowym jest \texttt{POST /process}, który przyjmuje strumień danych binarnych (pliki graficzne PNG), wykonuje wieloetapowy potok operacji matematycznych za pomocą biblioteki \textit{Pillow} (filtracja dolnoprzepustowa, konwersja przestrzeni barw, detekcja krawędzi algorytmem Sobela) oraz oblicza entropię Shannona dla poszczególnych kanałów RGB. Dodatkowym punktem kontrolnym jest \texttt{GET /fibonacci}, implementujący rekurencyjny algorytm wyznaczania ciągu Fibonacciego o złożoności obliczeniowej $O(2^n)$. Zużycie procesora w tym serwisie wykazuje ścisłą liniową korelację z natężeniem ruchu sieciowego.
+
+\subsection{Serwis wejścia-wyjścia (io-service) -- Profil I/O-bound}
+\label{subsec:io_service_spec}
+Serwis symuluje zachowanie systemów SaaS obciążonych operacjami bazodanowymi oraz integracjami sieciowymi z zewnętrznymi dostawcami API. Endpoint \texttt{GET /query} realizuje asynchroniczny łańcuch opóźnień za pomocą instrukcji \texttt{asyncio.sleep()} z losowym rozrzutem (\textit{jitter}) rzędu $\pm20\%$. Procesor w trakcie oczekiwania pozostaje bezczynny. Endpoint \texttt{GET /upstream} przesyła żądania do pomocniczego serwisu \texttt{echo-server}, sprawdzając zachowanie warstwy sieciowej Load Balancera pod kątem limitów współbieżności i utrzymywania trwałych połączeń TCP (\textit{Keep-Alive}).
+
+\subsection{Serwis pomocniczy (echo-server)}
+\label{subsec:echo_server_spec}
+Minimalistyczna usługa stanowiąca zależność zewnętrzną dla \texttt{io-service}. Jej jedynym zadaniem jest natychmiastowe odsyłanie nagłówków oraz zawartości żądania (\texttt{POST /echo}), co umożliwia precyzyjny pomiar opóźnień transportowych wewnątrz sieci VPC chmury GCP.
+
+\section{Macierz eksperymentów i strategie autoskalowania}
+\label{sec:macierz_scenariuszy}
+Metodologia badawcza opiera się na sekwencyjnym wykonaniu **8 scenariuszy eksperymentalnych** (6 scenariuszy właściwych tworzących macierz badawczą $2 \times 3$ oraz 2 scenariuszy bazowych typu \textit{baseline}), co pozwala na pełną izolację zmiennych niezależnych. Strukturę macierzy badawczej wraz z identyfikatorami testowymi przedstawia tabela \ref{tab:macierz-badawcza}.
+
+\begin{table}[ht]
+\centering
+\caption{Macierz badawcza eksperymentów i identyfikatory scenariuszy}
+\label{tab:macierz-badawcza}
+\begin{tabular}{|p{3.5cm}|p{3.5cm}|p{3.5cm}|p{4cm}|}
+\hline
+\textbf{Profil aplikacji / Typ obciążenia} & \textbf{Strategia HPA CPU} (Próg: 50\%) & \textbf{Strategia HPA Memory} (Próg: 70\%) & \textbf{Strategia HPA Custom RPS} (Próg: 100 żądań/s/Pod) \\ \hline
+\textbf{CPU-bound} (\textit{cpu-service}) & \texttt{cpu-cpu} & \texttt{cpu-memory} & \texttt{cpu-custom} \\ \hline
+\textbf{I/O-bound} (\textit{io-service})   & \texttt{io-cpu}  & \texttt{io-memory}  & \texttt{io-custom}  \\ \hline
+\end{tabular}
 \end{table}
 
-Każda z sześciu kombinacji jest testowana w odrębnym scenariuszu, co daje łącznie sześć scenariuszy właściwych (plus dwa scenariusze bazowe bez HPA). Macierz umożliwia izolowanie wpływu pojedynczej zmiennej niezależnej (strategia HPA) przy kontrolowanym profilu obciążeniowym.
-
-Oprócz sześciu scenariuszy macierzy badawczej zdefiniowano dwa scenariusze bazowe (\textit{baseline}):
-
+Dodatkowo zdefiniowano dwa scenariusze odniesienia (ang. \textit{baseline}), charakteryzujące się całkowitym wyłączeniem mechanizmów autoskalowania (stała liczba replik równa 1):
 \begin{itemize}
-  \item \texttt{baseline-cpu} — \textit{CPU-bound}, brak HPA, 1 replika na stałe.
-  \item \texttt{baseline-io} — \textit{I/O-bound}, brak HPA, 1 replika na stałe.
+    \item \textbf{\texttt{baseline-cpu}} -- badanie \textit{cpu-service} przy braku automatycznego skalowania,
+    \item \textbf{\texttt{baseline-io}} -- badanie \textit{io-service} przy braku automatycznego skalowania.
 \end{itemize}
 
-Scenariusze bazowe służą jako punkt odniesienia do oceny, czy HPA w ogóle poprawia wydajność w stosunku do statycznej konfiguracji. Dodatkowo, dla testów integracyjnych zdefiniowano scenariusz łączony (\texttt{combined}), w którym oba serwisy są obciążane jednocześnie.
-
-\section{Aplikacje badawcze}
-
-System składa się z trzech mikroserwisów — dwóch podlegających badaniu (\texttt{cpu-service}, \texttt{io-service}) oraz jednego pomocniczego (\texttt{echo-server}). Każdy mikroserwis jest niezależną aplikacją \textit{FastAPI} (Python 3.12) konteneryzowaną za pomocą \textit{Docker} i wdrażaną jako \textit{Deployment} w \textit{Kubernetes}.
-
-\subsection{CPU-service — obciążenie CPU-bound}
-
-\texttt{cpu-service} implementuje dwa endpointy obciążające procesor:
-
-\begin{itemize}
-  \item \texttt{POST /process} — przetwarzanie obrazu: akceptuje plik graficzny (\textit{multipart form}), wykonuje sekwencję operacji CPU-intensywnych z użyciem biblioteki \textit{Pillow} (m.in. konwersja do skali szarości, filtr \texttt{BLUR}, filtr \texttt{SHARPEN}, filtr \texttt{FIND\_EDGES}, ekstrakcja kanałów RGB, resize), oblicza entropię Shannona dla każdego kanału, zwraca statystyki przetwarzania (wymiary, entropia, czas).
-  \item \texttt{GET /fibonacci} — obliczanie $n$-tej liczby Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^{n})$. Parametr $n$ jest konfigurowalny (domyślnie $n = 30$).
-\end{itemize}
-
-Obie operacje są czysto CPU-intensywne — nie wykonują operacji sieciowych ani dyskowych poza odbiorem żądania i wysłaniem odpowiedzi. Dzięki temu zużycie CPU silnie koreluje z obciążeniem żądaniami.
-
-\subsection{IO-service — obciążenie I/O-bound}
-
-\texttt{io-service} implementuje dwa endpointy symulujące operacje wejścia-wyjścia:
-
-\begin{itemize}
-  \item \texttt{GET /query} — łańcuch asynchronicznych opóźnień: wykonuje sekwencję wywołań \texttt{asyncio.sleep()} z konfigurowalnym opóźnieniem bazowym (\texttt{delay}, domyślnie 100\,ms), liczbą kroków (\texttt{steps}, domyślnie 3) oraz losowym rozrzutem (\textit{jitter}, domyślnie $\pm20$\%). Całkowity czas odpowiedzi jest sumą opóźnień, a procesor pozostaje bezczynny podczas oczekiwania.
-  \item \texttt{GET /upstream} — wywołanie zewnętrzne: przekazuje żądanie do \texttt{echo-server} i zwraca odpowiedź z dodatkowym opóźnieniem symulującym przetwarzanie.
-\end{itemize}
-
-Serwis wykorzystuje \texttt{asyncio.Semaphore(50)} do ograniczenia liczby współbieżnych zapytań, co zapobiega wyczerpaniu zasobów systemowych przy bardzo wysokim obciążeniu.
-
-\subsection{Echo-server — serwis pomocniczy}
-
-\texttt{echo-server} jest minimalistycznym serwisem pełniącym rolę zależności zewnętrznej dla \texttt{io-service}. Udostępnia dwa endpointy:
-
-\begin{itemize}
-  \item \texttt{GET /health} — \textit{health check}.
-  \item \texttt{POST /echo} — zwraca kopię otrzymanego żądania (nagłówki, body, parametry), umożliwiając weryfikację poprawnego przekazywania danych.
-\end{itemize}
-
-\textit{Echo-server} jest wyłączony z macierzy badawczej — służy wyłącznie jako cel wywołań w scenariuszu \texttt{external\_calls} dla \texttt{io-service}.
-
-\subsection{Memory-service — serwis pamięciowy (dodatkowy)}
-
-W ramach rozwoju projektu zaimplementowano również \texttt{memory-service} — serwis z pamięciową bazą klucz-wartość (\textit{in-memory cache}) symulujący obciążenie typu \textit{memory-bound}. Udostępnia endpointy \texttt{GET/POST/DELETE /cache}, \texttt{POST /cache/fill} (wypełnienie cache danymi testowymi o kontrolowanym rozmiarze) oraz \texttt{GET /stats} (statystyki trafień). \texttt{memory-service} nie został włączony do głównej macierzy badawczej na obecnym etapie prac — stanowi rozszerzenie do potencjalnych przyszłych badań.
-
-\section{Strategie HPA}
-
-Dla każdej aplikacji badawczej zdefiniowano trzy warianty \textit{HorizontalPodAutoscaler}, różniące się wyłącznie typem metryki. Wszystkie HPA współdzielą następujące parametry:
-
-\begin{itemize}
-  \item \texttt{minReplicas}: 2
-  \item \texttt{maxReplicas}: 10
-  \item \texttt{apiVersion}: \texttt{autoscaling/v2}
-\end{itemize}
-
-\subsection{HPA CPU (Resource Metric)}
-
-Strategia oparta na zużyciu CPU — HPA monitoruje średnie zużycie procesora jako procent \textit{resource request} dla wszystkich Podów w \textit{Deploymencie}. Wartość progowa: 50\%. Oznacza to, że jeśli średnie zużycie CPU przekracza 50\% \texttt{requests} (czyli 125\,m dla cpu-service, 50\,m dla io-service), HPA dodaje repliki.
-
-\begin{lstlisting}[language=yaml, caption={Konfiguracja HPA CPU dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-cpu.yaml})}, label={lst:hpa-cpu-config}]
-metrics:
-  - type: Resource
-    resource:
-      name: cpu
-      target:
-        type: Utilization
-        averageUtilization: 50
-\end{lstlisting}
-
-Strategia CPU jest najczęściej stosowaną i domyślnie rekomendowaną w ekosystemie \textit{Kubernetes}. Jej skuteczność zależy od tego, czy zużycie CPU koreluje z obciążeniem aplikacji.
-
-\subsection{HPA Memory (Resource Metric)}
-
-Strategia oparta na zużyciu pamięci — HPA monitoruje średnie zużycie pamięci jako procent \textit{resource request}. Wartość progowa: 70\%. Strategia ta jest rzadziej stosowana, ponieważ większość aplikacji alokuje pamięć w sposób nieelastyczny (po uruchomieniu lub przy pierwszym żądaniu), co sprawia, że metryka pamięci nie odzwierciedla bieżącego obciążenia.
-
-\begin{lstlisting}[language=yaml, caption={Konfiguracja HPA Memory dla \texttt{io-service} (plik \texttt{k8s/io-service/hpa-memory.yaml})}, label={lst:hpa-memory-config}]
-metrics:
-  - type: Resource
-    resource:
-      name: memory
-      target:
-        type: Utilization
-        averageUtilization: 70
-\end{lstlisting}
-
-Hipoteza badawcza przewiduje, że HPA Memory będzie nieskuteczne dla obu profili obciążeniowych — ani CPU-bound, ani I/O-bound nie powinny generować istotnych wahań zużycia pamięci skorelowanych z ruchem.
-
-\subsection{HPA Custom RPS (Pods Metric)}
-
-Strategia oparta na niestandardowej metryce \texttt{http\_requests\_per\_second} — liczbie żądań HTTP na sekundę na Pod. Metryka jest dostarczana przez \textit{prometheus-adapter}, który transformuje liczniki \textit{Prometheusa} (\texttt{cpu\_service\_http\_requests\_total}, \texttt{io\_service\_http\_requests\_total}) na chwilową wartość RPS za pomocą funkcji \texttt{rate()\lbrack{}1m\rbrack{}}. Wartość progowa: 100 żądań na sekundę na Pod.
-
-\begin{lstlisting}[language=yaml, caption={Konfiguracja HPA Custom RPS (plik \texttt{k8s/cpu-service/hpa-custom.yaml})}, label={lst:hpa-custom-config}]
-metrics:
-  - type: Pods
-    pods:
-      metric:
-        name: http_requests_per_second
-      target:
-        type: AverageValue
-        averageValue: "100"
-\end{lstlisting}
-
-Strategia RPS jest bezpośrednio powiązana z obciążeniem żądaniami — niezależnie od tego, czy żądania są CPU-intensywne, czy I/O-intensywne, liczba żądań na sekundę rośnie proporcjonalnie do ruchu. Dzięki temu HPA Custom RPS powinna być skuteczna dla obu profili obciążeniowych.
-
-\section{Infrastruktura monitorująca}
-
-\subsection{Prometheus}
-
-\textit{Prometheus} pełni rolę centralnego systemu zbierania metryk. Jest skonfigurowany do scrapowania:
-
-\begin{itemize}
-  \item \textbf{Metryk infrastrukturalnych} — z \texttt{kubernetes-sd} (CPU, RAM, liczba replik, stan Podów) co 15 sekund.
-  \item \textbf{Metryk aplikacyjnych} — z endpointów \texttt{/metrics} wystawianych przez \texttt{cpu-service}, \texttt{io-service} i \texttt{echo-server} (RPS, czas przetwarzania, liczba aktywnych zapytań, metryki niestandardowe).
-\end{itemize}
-
-\subsection{Grafana}
-
-\textit{Grafana} udostępnia dashboard ,,Magisterka — System Overview'' zawierający 16 paneli wizualizujących kluczowe metryki systemu w czasie rzeczywistym (odświeżanie co 10 sekund):
-
-\begin{itemize}
-  \item RPS dla \texttt{cpu-service} i \texttt{io-service} (panele typu \texttt{stat} z miniwykresem).
-  \item Zużycie CPU na Pod (panele typu \texttt{timeseries}).
-  \item Zużycie pamięci na Pod.
-  \item Liczba replik per \textit{Deployment}.
-  \item Opóźnienia (\textit{latency}): p50, p95, p99.
-  \item Liczba żądań w toku (\textit{in-flight}).
-  \item Stan HPA (pożądana vs. aktualna liczba replik).
-\end{itemize}
-
-\subsection{Prometheus Adapter}
-
-\textit{Prometheus Adapter} (wersja \texttt{v0.12.0}) implementuje \textit{Custom Metrics API} w \textit{Kubernetes}, umożliwiając HPA odczytywanie metryk z \textit{Prometheusa}. Konfiguracja adaptera (przechowywana w \texttt{ConfigMap} \texttt{prometheus-adapter-config}) definiuje cztery reguły mapowania:
-
-\begin{enumerate}
-  \item \texttt{cpu\_service\_http\_requests\_total} $\rightarrow$ \texttt{http\_requests\_per\_second} (przez \texttt{rate()\lbrack{}1m\rbrack{}}).
-  \item \texttt{io\_service\_http\_requests\_total} $\rightarrow$ \texttt{http\_requests\_per\_second} (przez \texttt{rate()\lbrack{}1m\rbrack{}}).
-  \item \texttt{cpu\_service\_http\_requests\_inprogress} $\rightarrow$ \texttt{http\_requests\_inflight} (wartość chwilowa).
-  \item \texttt{io\_service\_http\_requests\_inprogress} $\rightarrow$ \texttt{http\_requests\_inflight} (wartość chwilowa).
-\end{enumerate}
-
-Reguły mapowania wykorzystują mechanizm \texttt{<<.LabelMatchers>>} i \texttt{<<.GroupBy>>} do dynamicznego filtrowania po namespace i Podzie, co jest wymagane przez \textit{Custom Metrics API}.
-
-\section{Topologia wdrożeniowa}
-
-Wszystkie komponenty systemu są wdrażane w pojedynczym \textit{namespace} \texttt{magisterka}. Topologia obejmuje:
-
-\begin{itemize}
-  \item \textbf{3 Deploymenty} aplikacyjne: \texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server} (plus opcjonalnie \texttt{memory-service}).
-  \item \textbf{3 Serwisy} typu \texttt{ClusterIP}: każdy kieruje ruch na port 80 do \texttt{targetPort 8000} odpowiedniego \textit{Deploymentu}.
-  \item \textbf{6 HPA} (po 3 na serwis badawczy): pliki \texttt{hpa-cpu.yaml}, \texttt{hpa-memory.yaml}, \texttt{hpa-custom.yaml}.
-  \item \textbf{Monitoring}: \texttt{prometheus} + \texttt{grafana} + \texttt{prometheus-adapter} w tym samym namespace.
-  \item \textbf{Ingress} (\textit{Traefik}): routing na podstawie nazwy hosta (\texttt{cpu-magisterka.k3s.local} $\rightarrow$ \texttt{cpu-service}, \texttt{io-magisterka.k3s.local} $\rightarrow$ \texttt{io-service}).
-\end{itemize}
-
-W środowisku testowym ruch z \textit{k6} do serwisów jest kierowany przez \texttt{kubectl port-forward}, co eliminuje potrzebę zewnętrznego \textit{LoadBalancera} i zapewnia minimalne opóźnienie sieciowe ($<1$\,ms, lokalny \texttt{localhost}).
-
-\subsection{Zasoby przydzielone serwisom}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Serwis} & \textbf{CPU request} & \textbf{CPU limit} & \textbf{Memory request / limit} \\
-    \hline
-    \texttt{cpu-service} & 250\,m & 1000\,m & 256\,Mi / 512\,Mi \\
-    \texttt{io-service} & 100\,m & 500\,m & 128\,Mi / 256\,Mi \\
-    \texttt{echo-server} & 50\,m & 200\,m & 64\,Mi / 128\,Mi \\
-    \texttt{memory-service} & 200\,m & 500\,m & 256\,Mi / 1024\,Mi \\
-    \hline
-  \end{tabularx}
-  \caption{Zasoby przydzielone serwisom (\textit{resource requests} i \textit{limits})}
-  \label{tab:resource-allocation}
-\end{table}
-
-Różnica w przydziale zasobów między \texttt{cpu-service} a \texttt{io-service} odzwierciedla odmienne profile obciążeniowe: \texttt{cpu-service} potrzebuje więcej CPU (250\,m vs. 100\,m) i pamięci (256\,Mi vs. 128\,Mi) ze względu na operacje przetwarzania obrazu.
-
-\section{Plan eksperymentów}
-
-\subsection{Scenariusze testowe}
-
-Eksperyment obejmuje 8 scenariuszy uruchamianych sekwencyjnie:
-
-\begin{enumerate}
-  \item \texttt{baseline-cpu} — CPU-bound, brak HPA, 1 replika.
-  \item \texttt{baseline-io} — I/O-bound, brak HPA, 1 replika.
-  \item \texttt{cpu-cpu} — CPU-bound + HPA CPU (50\%).
-  \item \texttt{cpu-memory} — CPU-bound + HPA Memory (70\%).
-  \item \texttt{cpu-custom} — CPU-bound + HPA Custom RPS (100/Pod).
-  \item \texttt{io-cpu} — I/O-bound + HPA CPU (50\%).
-  \item \texttt{io-memory} — I/O-bound + HPA Memory (70\%).
-  \item \texttt{io-custom} — I/O-bound + HPA Custom RPS (100/Pod).
-\end{enumerate}
-
-\subsection{Procedura eksperymentalna}
-
-Każdy scenariusz jest wykonywany według ściśle określonej procedury, zaimplementowanej w skrypcie \texttt{scripts/run-tests.sh}:
-
-\begin{enumerate}
-  \item \textbf{Przełączenie HPA} — usunięcie wszystkich istniejących HPA dla docelowego serwisu i nałożenie pliku HPA odpowiadającego testowanej strategii.
-  \item \textbf{Reset Deploymentu} — skalowanie \textit{Deploymentu} do 1 repliki i oczekiwanie na gotowość (\texttt{rollout status}).
-  \item \textbf{Uruchomienie testu k6} — wykonanie właściwego skryptu obciążeniowego.
-  \item \textbf{Zapis wyników} — wyniki k6 (JSON + tekstowe podsumowanie) zapisywane do katalogu \texttt{results/<scenariusz>/}.
-  \item \textbf{Powtórzenie} — kroki 1--4 powtarzane 5-krotnie dla każdego scenariusza.
-  \item \textbf{Cooldown} — po każdym scenariuszu: skalowanie obu serwisów do 1 repliki, usunięcie wszystkich HPA, odczekanie 120 sekund na stabilizację klastra.
-\end{enumerate}
-
-\subsection{Profile obciążeniowe k6}
-
-Każdy scenariusz wykorzystuje dedykowany skrypt \textit{k6} dopasowany do profilu obciążeniowego:
-
-\textbf{CPU-bound} (skrypt \texttt{cpu-load-test.js}):
-\begin{itemize}
-  \item \textbf{Scenariusz Fibonacci}: ramp-up od 1 do 50 VU w ciągu 60 sekund, następnie stałe obciążenie 50 VU przez 120 sekund.
-  \item \textbf{Scenariusz przetwarzanie obrazu}: stałe 10 VU przez 180 sekund, każde żądanie wysyła losowo wygenerowany obraz PNG ($100 \times 100$ pikseli) do \texttt{POST /process}.
-\end{itemize}
-
-\textbf{I/O-bound} (skrypt \texttt{io-load-test.js}):
-\begin{itemize}
-  \item \textbf{Scenariusz stałych zapytań}: ramp-up od 1 do 100 VU w ciągu 60 sekund, stałe obciążenie przez 120 sekund, \texttt{delay=100\,ms}, \texttt{steps=3}.
-  \item \textbf{Scenariusz stres-test}: stałe 20 VU, \texttt{delay} rosnący od 50\,ms do 2000\,ms w krokach co 30 sekund.
-  \item \textbf{Scenariusz wywołań zewnętrznych}: stałe 20 VU, \texttt{external\_call=true}, żądania do \texttt{GET /upstream}.
-\end{itemize}
-
-\textbf{Scenariusz łączony} (skrypt \texttt{combined-scenario.js}):
-\begin{itemize}
-  \item Fibonacci: 30 VU (ramp-up 30\,s, steady 180\,s).
-  \item Przetwarzanie obrazu: 5 VU (stałe, 180\,s).
-  \item Zapytania IO: 80 VU (ramp-up 60\,s, steady 180\,s).
-\end{itemize}
-
-Wszystkie skrypty definiują progi akceptacji (\textit{thresholds}): $p(95) < 5000$\,ms dla scenariuszy CPU, $p(95) < 10000$\,ms dla scenariuszy IO, oraz \texttt{http\_req\_failed} $< 1\%$ (CPU) / $< 5\%$ (IO).
-
-\subsection{Metryki badawcze}
-
-Dla każdego scenariusza zbierane są następujące metryki:
-
-\begin{itemize}
-  \item \textbf{Opóźnienie (\textit{latency})} — $p(50)$, $p(95)$, $p(99)$ czasu odpowiedzi HTTP (ms).
-  \item \textbf{Przepustowość (\textit{throughput})} — liczba żądań na sekundę (RPS) obsłużonych przez system.
-  \item \textbf{Czas do skalowania (\textit{time-to-scale})} — czas od przekroczenia progu HPA do osiągnięcia docelowej liczby replik.
-  \item \textbf{Efektywność skalowania (\textit{scaling efficiency})} — stosunek zmiany przepustowości do zmiany liczby replik.
-  \item \textbf{Stopa błędów (\textit{error rate})} — odsetek żądań zakończonych kodem HTTP $\geq 400$.
-  \item \textbf{Liczba replik w czasie} — przebieg czasowy skalowania (dane z \textit{Prometheusa}).
-  \item \textbf{Zużycie CPU i pamięci} — średnie i szczytowe zużycie zasobów na Pod.
-\end{itemize}
-
-\section{Podsumowanie architektury}
-
-Zaprojektowany system badawczy umożliwia kontrolowane, powtarzalne eksperymenty porównujące skuteczność trzech strategii HPA dla dwóch profili obciążeniowych. Kluczowe decyzje architektoniczne:
-
-\begin{enumerate}
-  \item \textbf{Izolacja zmiennych} — każdy scenariusz testuje dokładnie jedną kombinację (profil $\times$ strategia), przy wyizolowanym serwisie (port-forward) i ustabilizowanym klastrze (cooldown).
-  \item \textbf{Powtarzalność} — każdy scenariusz jest powtarzany 5-krotnie, co umożliwia analizę statystyczną i eliminację wpływu anomalii.
-  \item \textbf{Automatyzacja} — cały proces (przełączanie HPA, reset Deploymentów, uruchamianie k6, zbieranie wyników) jest w pełni zautomatyzowany przez skrypt \texttt{run-tests.sh}.
-  \item \textbf{Odtwarzalność} — wszystkie manifesty \textit{Kubernetes}, skrypty k6 i konfiguracje są przechowywane w repozytorium, co umożliwia odtworzenie środowiska na dowolnym klastrze \textit{Kubernetes}.
-\end{enumerate}
+Wszystkie scenariusze wykorzystujące HPA posiadają ujednolicone ramy brzegowe: minimalna liczba replik (\texttt{minReplicas}) wynosi 2, natomiast maksymalna dopuszczalna bariera skalowania (\texttt{maxReplicas}) wynosi 10 Podów. Rezultaty eksperymentów posłużą do weryfikacji głównej hipotezy badawczej: \textit{efektywność automatycznego skalowania jest ściśle zależna od korelacji pomiędzy wybraną metryką sterującą a profilem obciążenia mikroserwisu SaaS}.

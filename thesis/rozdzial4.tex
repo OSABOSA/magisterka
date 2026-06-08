@@ -1,384 +1,130 @@
-% =============================================================================
-% Rozdział 4: Implementacja
-% =============================================================================
-\chapter{Implementacja}
+\chapter{Implementacja systemu i środowiska pomiarowego}
+\label{ch:implementacja_systemu}
 
-Rozdział niniejszy opisuje implementację systemu badawczego — strukturę kodu, implementację mikroserwisów, konfigurację \textit{Kubernetes}, infrastrukturę monitorującą oraz skrypty automatyzujące. Wszystkie listingi odwołują się do rzeczywistych plików w repozytorium projektu.
+W rozdziale tym szczegółowo opisano proces implementacji chmurowego środowiska badawczego. Przedstawiono strukturę repozytorium kodu, konfigurację manifestów deklaratywnych Kubernetes oraz zaawansowaną logikę skryptów testowych, uwzględniającą specyfikę bezpośredniego routingu sieciowego bez użycia serwerów DNS.
 
-\section{Struktura repozytorium}
-
-Kod projektu jest zorganizowany w następującej strukturze katalogów:
+\section{Struktura repozytorium kodu źródłowego}
+\label{sec:struktura_repozytorium}
+Projekt badawczy został zorganizowany w jednolitą strukturę katalogów (ang. \textit{monorepo}), co zapewnia pełną powtarzalność oraz ułatwia automatyzację procesów budowania obrazów kontenerowych. Kluczowe elementy składowe projektu przedstawiają się następująco:
 
 \begin{verbatim}
 magisterka/
-  apps/
-    cpu-service/         # CPU-bound microservice
-    io-service/          # I/O-bound microservice
-    echo-server/         # Auxiliary echo service
-    memory-service/      # Memory-bound microservice (extension)
-  k8s/
-    base/                # Namespace
-    cpu-service/         # Deployment + Service + HPA x3
-    io-service/          # Deployment + Service + HPA x3
-    echo-service/        # Deployment + Service
-    memory-service/      # Deployment + Service + HPA
-    monitoring/          # Prometheus, Grafana, Prometheus Adapter
-    ingress.yaml         # Traefik Ingress
-  monitoring/
-    dashboards/          # Grafana dashboard JSON
-  scripts/
-    deploy-k3s.sh        # Full deployment pipeline
-    run-tests.sh         # Test orchestration (8 scenarios)
-    run-all.sh           # deploy + tests combined
-  tests/
-    k6/                  # k6 load test scripts
-  docs/
-    prd.md               # Product Requirements Document
-  docker-compose.yaml    # Local development environment
+├── apps/
+│   ├── cpu-service/       # Aplikacja CPU-bound (FastAPI + Pillow)
+│   ├── io-service/        # Aplikacja I/O-bound (asyncio + httpx)
+│   ├── echo-server/       # Serwis pomocniczy
+│   └── memory-service/    # Rozszerzenie bazy badawczej (In-memory cache)
+├── k8s/
+│   ├── base/              # Definicja Namespace magisterka
+│   ├── cpu-service/       # Manifesty Deployment, Service, HPA (x3)
+│   ├── io-service/        # Manifesty Deployment, Service, HPA (x3)
+│   └── monitoring/        # Konfiguracje Prometheus i Prometheus Adapter
+└── tests/
+    └── k6/                # Skrypty testowe (cpu-load-test.js, io-load-test.js)
 \end{verbatim}
 
-\section{Implementacja mikroserwisów}
+\section{Implementacja bezpośredniego routingu sieciowego w skryptach k6}
+\label{sec:implementacja_routingu_k6}
+W celu eliminacji dodatkowych warstw translacji nazw i uniknięcia narzutu konfiguracyjnego związanego z serwerami DNS w systemie operacyjnym generatora ruchu, mechanizm mapowania domen został wstrzyknięty bezpośrednio do kodu skryptów testowych \textit{k6}. 
 
-Każdy mikroserwis jest zaimplementowany jako niezależna aplikacja \textit{FastAPI} (Python 3.12), konteneryzowana za pomocą \textit{Docker} i uruchamiana przez \textit{Uvicorn} (serwer ASGI).
+Wykorzystano do tego celu zaawansowaną konfigurację pola \texttt{hosts} wewnątrz globalnego obiektu opcji środowiska uruchomieniowego \textit{k6}. Silnik pomiarowy automatycznie podmienia adresy IP na poziomie niskopoziomowych gniazd sieciowych, wstrzykując jednocześnie prawidłową wartość tekstową do nagłówka \texttt{Host} protokołu HTTP/1.1. Rozwiązanie to symuluje rzeczywiste zachowanie systemów produkcyjnych przechodzących przez chmurowy Load Balancer GCP. Pełną strukturę konfiguracyjną skryptu obciążeniowego dla serwisu obliczeniowego przedstawia listing \ref{lst:implementacja_k6_cpu}.
 
-\subsection{Wspólne cechy implementacyjne}
+\begin{lstlisting}[language=JavaScript, caption={Konfiguracja bezpośredniego mapowania adresów IP Load Balancera GCP w skrypcie k6}, label={lst:implementacja_k6_cpu}]
+import http from 'k6/http';
+import { check, sleep } from 'k6';
 
-Wszystkie serwisy dzielą następujące cechy:
+export const options = {
+  scenarios: {
+    fibonacci_stress: {
+      executor: 'ramping-vus',
+      startVUs: 1,
+      stages: [
+        { duration: '60s', target: 50 },  // Faza Ramp-up
+        { duration: '120s', target: 50 }, // Faza Steady-state
+        { duration: '30s', target: 0 },   // Faza Ramp-down
+      ],
+      gracefulRampDown: '30s',
+      exec: 'runFibonacci',
+    },
+  },
+  hosts: {
+    'cpu.saas-magisterka.internal': '35.242.210.14',
+    'io.saas-magisterka.internal': '35.242.215.88',
+  },
+  thresholds: {
+    'http_req_duration': ['p(95)<5000'], // Progi akceptacji SLA
+    'http_req_failed': ['rate<0.01'],
+  },
+};
 
-\begin{itemize}
-  \item \textbf{FastAPI + Uvicorn} — framework \textit{FastAPI} 0.115.6 z serwerem \textit{Uvicorn} 0.34.0. Wybór \textit{FastAPI} podyktowany jest natywną obsługą asynchroniczności (\texttt{async/await}), automatyczną generacją dokumentacji OpenAPI oraz lekkością.
-  \item \textbf{Dockerfile} — identyczny wzorzec dla wszystkich serwisów: obraz bazowy \texttt{python:3.12-slim}, instalacja zależności przez \texttt{pip install --no-cache-dir}, aplikacja kopiowana jako pojedynczy plik \texttt{main.py}.
-  \item \textbf{Prometheus metrics} — automatyczna instrumentacja przez \texttt{prometheus-fastapi-instrumentator} 7.0.0, która wystawia metryki HTTP (liczniki żądań, histogramy czasu odpowiedzi, liczba żądań w toku) na endpointzie \texttt{/metrics}.
-  \item \textbf{Health check} — endpoint \texttt{GET /health} zwracający \texttt{\{"status": "ok", "service": "..."\}}, wykorzystywany przez \textit{liveness} i \textit{readiness probes} w \textit{Kubernetes}.
-  \item \textbf{CORS} — middleware \texttt{CORSMiddleware} z zezwoleniem na wszystkie źródła (\texttt{allow\_origins=["*"]}) dla wygody testowania.
-\end{itemize}
+export function runFibonacci() {
+  const url = 'http://cpu.saas-magisterka.internal/fibonacci?n=32';
+  const res = http.get(url);
+  check(res, {
+    'status jest 200': (r) => r.status === 200,
+  });
+  sleep(0.5);
+}
+\end{lstlisting}
 
-\lstinputlisting[
-  language=Dockerfile,
-  caption={Dockerfile dla \texttt{cpu-service} (wzorzec wspólny dla wszystkich serwisów)},
-  label={lst:dockerfile-cpu},
-  firstline=1,
-  lastline=8
-]{../apps/cpu-service/Dockerfile}
+\section{Automatyzacja procesów telemetrycznych i eksport danych}
+\label{sec:implementacja_telemetrii_grafana}
+Akwizycja parametrów wydajnościowych została w pełni scentralizowana i zautomatyzowana w oparciu o zapytania API do bazy danych szeregów czasowych. Odstąpiono od parsowania logów terminalowych na rzecz ciągłego monitorowania parametrów infrastrukturalnych dostarczanych przez \texttt{kube-state-metrics} oraz \texttt{cAdvisor}. Interwał skrobania (ang. \textit{scrape interval}) został zaostrzony do wartości $\Delta t = 5$ sekund, co pozwala na uchwycenie gwałtownych anomalii chmurowych.
 
-\subsection{CPU-service}
-
-\texttt{cpu-service} implementuje dwa endpointy obciążające procesor:
-
-\subsubsection{POST /process — przetwarzanie obrazu}
-
-Endpoint akceptuje obraz w formacie \textit{multipart form-data}, wykonuje 5-etapowy potok przetwarzania CPU-intensywnego z użyciem biblioteki \textit{Pillow} 11.1.0:
-
+Dla każdego z 8 realizowanych eksperymentów, po zakończeniu pętli testowej, z platformy \textit{Grafana} za pomocą zautomatyzowanych zapytań HTTP pobierane były kompletne profile pomiarowe w formacie plików CSV. Zbiór ten obejmował pięć kluczowych wymiarów telemetrycznych:
 \begin{enumerate}
-  \item Konwersja do skali szarości (\texttt{image.convert("L")}).
-  \item Zastosowanie filtru \texttt{BLUR}.
-  \item Zastosowanie filtru \texttt{SHARPEN}.
-  \item Zastosowanie filtru \texttt{FIND\_EDGES}.
-  \item Ekstrakcja kanałów RGB i resize do $100 \times 100$ pikseli.
+    \item \textbf{Dynamiczna liczba replik HPA:} aktualna liczba Podów w stanie \texttt{Running} rejestrowana w dziedzinie czasu przez płaszczyznę kontrolną.
+    \item \textbf{Zużycie CPU per Pod:} rzeczywiste obciążenie procesora wyrażone w milicząstkach rdzenia (\textit{mCPU}), mapowane bezpośrednio z liczników cgroups systemu Linux.
+    \item \textbf{Alokacja pamięci RAM:} dynamiczne zmiany w zużyciu pamięci operacyjnej kontenerów wyrażone w megabajtach (MB).
+    \item \textbf{Chwilowa przepustowość (RPS):} zagregowana liczba żądań HTTP obsłużonych pomyślnie przez punkty końcowe usług w każdej sekundzie testu.
+    \item \textbf{Wykresy opóźnień sieciowych (Latency):} pełne przebiegi czasowe czasów odpowiedzi z podziałem na percentyle wydajnościowe $p_{50}$, $p_{95}$ oraz $p_{99}$.
 \end{enumerate}
 
-Po przetworzeniu, dla każdego kanału obliczana jest entropia Shannona według wzoru:
-
-\begin{equation}
-  H = -\sum_{i=0}^{255} p_i \log_2(p_i), \quad \text{gdzie } p_i = \frac{\text{histogram}[i]}{\text{total\_pixels}}
-\end{equation}
-
-\lstinputlisting[
-  language=Python,
-  caption={Funkcja \texttt{shannon\_entropy()} w \texttt{cpu-service}},
-  label={lst:cpu-entropy},
-  firstline=98,
-  lastline=106
-]{../apps/cpu-service/main.py}
-
-\subsubsection{GET /fibonacci — ciąg Fibonacciego}
-
-Endpoint oblicza $n$-tą liczbę Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^n)$. Parametr $n$ jest pobierany z \textit{query string} (domyślnie 30). Wybór rekurencyjnej implementacji jest celowy — algorytm ten jest skrajnie nieefektywny obliczeniowo, co gwarantuje wysokie zużycie CPU przy niewielkiej liczbie żądań.
-
-\lstinputlisting[
-  language=Python,
-  caption={Rekurencyjna implementacja ciągu Fibonacciego w \texttt{cpu-service}},
-  label={lst:cpu-fib},
-  firstline=82,
-  lastline=90
-]{../apps/cpu-service/main.py}
-
-\subsubsection{Metryki niestandardowe}
-
-\texttt{cpu-service} wystawia dwie niestandardowe metryki \textit{Prometheus}:
-\begin{itemize}
-  \item \texttt{cpu\_service\_images\_processed\_total} — \textit{Counter} zliczający przetworzone obrazy.
-  \item \texttt{cpu\_service\_processing\_duration\_seconds} — \textit{Histogram} czasu przetwarzania obrazu.
-\end{itemize}
-
-\subsection{IO-service}
-
-\texttt{io-service} implementuje dwa endpointy symulujące operacje I/O:
-
-\subsubsection{GET /query — łańcuch opóźnień asynchronicznych}
-
-Endpoint wykonuje sekwencję wywołań \texttt{asyncio.sleep()} z konfigurowalnymi parametrami:
-
-\begin{itemize}
-  \item \texttt{delay} (domyślnie 100\,ms) — bazowe opóźnienie pojedynczego kroku.
-  \item \texttt{steps} (domyślnie 3) — liczba kroków w łańcuchu.
-  \item \texttt{jitter} (domyślnie 0.2) — losowy rozrzut $\pm20\%$ wokół \texttt{delay}.
-\end{itemize}
-
-Całkowity czas odpowiedzi wynosi $\text{steps} \times \text{delay} \times (1 \pm \text{jitter})$, a procesor pozostaje bezczynny podczas oczekiwania (\texttt{asyncio.sleep} zwalnia wątek). Dzięki temu zużycie CPU nie koreluje z liczbą żądań — serwis jest czysto \textit{I/O-bound}.
-
-\lstinputlisting[
-  language=Python,
-  caption={Endpoint \texttt{GET /query} w \texttt{io-service} — łańcuch opóźnień asynchronicznych},
-  label={lst:io-query},
-  firstline=195,
-  lastline=252
-]{../apps/io-service/main.py}
-
-\subsubsection{GET /upstream — wywołanie zewnętrzne}
-
-Endpoint przekazuje żądanie do \texttt{echo-server} za pomocą \texttt{httpx.AsyncClient} z timeoutem 10 sekund i zwraca odpowiedź z dodatkowym opóźnieniem symulującym przetwarzanie. Parametry: \texttt{delay} (domyślnie 50\,ms), \texttt{jitter} (domyślnie 0.1).
-
-\subsubsection{Kontrola współbieżności}
-
-Serwis wykorzystuje \texttt{asyncio.Semaphore(50)} do ograniczenia liczby współbieżnych zapytań, co zapobiega wyczerpaniu zasobów systemowych przy bardzo wysokim obciążeniu.
-
-\lstinputlisting[
-  language=Python,
-  caption={Inicjalizacja semafora współbieżności w \texttt{io-service}},
-  label={lst:io-semaphore},
-  firstline=78,
-  lastline=90
-]{../apps/io-service/main.py}
-
-\subsubsection{Metryki niestandardowe}
-
-\texttt{io-service} wystawia trzy niestandardowe metryki:
-\begin{itemize}
-  \item \texttt{io\_service\_queries\_total} — \textit{Counter} zliczający zapytania.
-  \item \texttt{io\_service\_upstream\_duration\_seconds} — \textit{Histogram} czasu wywołań zewnętrznych.
-  \item \texttt{io\_service\_concurrent\_queries} — \textit{Gauge} liczby aktualnie przetwarzanych zapytań.
-\end{itemize}
-
-\subsection{Echo-server}
-
-\texttt{echo-server} jest minimalistycznym serwisem pomocniczym z dwoma endpointami: \texttt{GET /health} i \texttt{POST /echo}. Endpoint \texttt{/echo} zwraca kopię otrzymanego żądania (nagłówki, \textit{body}, parametry), umożliwiając weryfikację poprawnego przekazywania danych przez \texttt{io-service} w scenariuszu \texttt{external\_calls}.
-
-Serwis korzysta z biblioteki \texttt{httpx} do opcjonalnych wywołań zwrotnych do \texttt{io-service} i rejestruje niestandardowe liczniki \texttt{echo\_server\_echoes\_total} oraz \texttt{echo\_server\_upstream\_calls\_total}.
-
-\subsection{Memory-service}
-
-\texttt{memory-service} implementuje pamięciową bazę klucz-wartość (\textit{in-memory cache}) z limitem 10000 wpisów (\texttt{MAX\_CACHE\_ENTRIES}). Udostępnia pełne CRUD dla cache: \texttt{GET /cache}, \texttt{GET /cache/\{key\}}, \texttt{POST /cache/\{key\}}, \texttt{DELETE /cache/\{key\}}, \texttt{DELETE /cache}.
-
-Endpoint badawczy \texttt{POST /cache/fill} wypełnia cache danymi testowymi o kontrolowanym rozmiarze — parametry \texttt{sessions} (liczba wpisów, 1--5000) i \texttt{size\_kb} (rozmiar pojedynczego wpisu w KB, 1--5000). Wartości są generowane przez \texttt{random.choices} z alfabetu ASCII, co zapobiega optymalizacji \textit{string-interning} Pythona.
-
-\lstinputlisting[
-  language=Python,
-  caption={Generowanie wartości testowych w \texttt{memory-service}},
-  label={lst:memory-generate},
-  firstline=201,
-  lastline=208
-]{../apps/memory-service/main.py}
-
-Endpoint \texttt{GET /stats} zwraca statystyki cache: liczbę wpisów, szacowany rozmiar, liczbę trafień/chybień, współczynnik trafień (\textit{hit ratio}) oraz średnią liczbę dostępów.
-
-\section{Konfiguracja Kubernetes}
-
-\subsection{Namespace i struktura zasobów}
-
-Wszystkie zasoby \textit{Kubernetes} są wdrażane w dedykowanym \textit{namespace} \texttt{magisterka}. Plik \texttt{k8s/base/namespace.yaml} definiuje ten namespace.
-
-\subsection{Deploymenty}
-
-Każdy \textit{Deployment} definiuje:
-\begin{itemize}
-  \item \texttt{replicas: 2} — początkowa liczba replik.
-  \item \texttt{imagePullPolicy: IfNotPresent} — obrazy są importowane lokalnie do \textit{containerd} k3s.
-  \item \texttt{livenessProbe} i \texttt{readinessProbe} — sprawdzanie \texttt{GET /health} co 10 sekund, z początkowym opóźnieniem 5 sekund.
-  \item \texttt{resources} — \textit{requests} i \textit{limits} CPU i pamięci (Tabela~\ref{tab:resource-allocation}).
-\end{itemize}
-
-\lstinputlisting[
-  language=yaml,
-  caption={Deployment \texttt{cpu-service} (plik \texttt{k8s/cpu-service/deployment.yaml})},
-  label={lst:deployment-cpu},
-  firstline=1,
-  lastline=45
-]{../k8s/cpu-service/deployment.yaml}
-
-\subsection{HPA}
-
-Dla \texttt{cpu-service} i \texttt{io-service} zdefiniowano po trzy warianty HPA, różniące się wyłącznie typem metryki. Każdy HPA używa API \texttt{autoscaling/v2} i ma zakres 2--10 replik.
-
-\subsubsection{HPA CPU}
-
-\lstinputlisting[
-  language=yaml,
-  caption={HPA CPU dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-cpu.yaml})},
-  label={lst:hpa-cpu},
-  firstline=1,
-  lastline=22
-]{../k8s/cpu-service/hpa-cpu.yaml}
-
-\subsubsection{HPA Memory}
-
-\lstinputlisting[
-  language=yaml,
-  caption={HPA Memory dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-memory.yaml})},
-  label={lst:hpa-memory},
-  firstline=1,
-  lastline=23
-]{../k8s/cpu-service/hpa-memory.yaml}
-
-\subsubsection{HPA Custom RPS}
-
-\lstinputlisting[
-  language=yaml,
-  caption={HPA Custom RPS dla \texttt{cpu-service} (plik \texttt{k8s/cpu-service/hpa-custom.yaml})},
-  label={lst:hpa-custom},
-  firstline=1,
-  lastline=24
-]{../k8s/cpu-service/hpa-custom.yaml}
-
-\subsection{Services}
-
-Wszystkie serwisy \textit{Kubernetes} są typu \texttt{ClusterIP}, mapując port 80 na \texttt{targetPort 8000}:
-
-\lstinputlisting[
-  language=yaml,
-  caption={Service dla \texttt{io-service} (plik \texttt{k8s/io-service/service.yaml})},
-  label={lst:service-io},
-  firstline=1,
-  lastline=15
-]{../k8s/io-service/service.yaml}
-
-\subsection{Ingress}
-
-\textit{Traefik Ingress} kieruje ruch na podstawie nazwy hosta:
-
-\lstinputlisting[
-  language=yaml,
-  caption={Ingress \textit{Traefik} (plik \texttt{k8s/ingress.yaml})},
-  label={lst:ingress},
-  firstline=1,
-  lastline=33
-]{../k8s/ingress.yaml}
-
-\section{Infrastruktura monitorująca}
-
-\subsection{Prometheus}
-
-\textit{Prometheus} jest wdrożony w namespace \texttt{magisterka} i skonfigurowany do automatycznego wykrywania celów przez \texttt{kubernetes\_sd\_configs} z filtrowaniem po \textit{namespace} i \textit{annotation} \texttt{prometheus.io/scrape: "true"}.
-
-\subsection{Grafana}
-
-\textit{Grafana} jest wdrożona z anonimowym dostępem i predefiniowanym źródłem danych \textit{Prometheus}. Dashboard ,,Magisterka — System Overview'' (UID: \texttt{magisterka-overview}) zawiera 16 paneli, odświeżanych co 10 sekund, pokazujących kluczowe metryki w czasie rzeczywistym.
-
-\subsection{Prometheus Adapter}
-
-\textit{Prometheus Adapter} v0.12.0 implementuje \textit{Custom Metrics API}. Konfiguracja w \texttt{ConfigMap} definiuje reguły \textit{PromQL} dla metryk RPS i \textit{in-flight} dla obu serwisów badawczych:
-
-\lstinputlisting[
-  language=yaml,
-  caption={Konfiguracja \textit{Prometheus Adapter} — reguły mapowania (plik \texttt{k8s/monitoring/prometheus-adapter-config.yaml})},
-  label={lst:adapter-config},
-  firstline=1,
-  lastline=66
-]{../k8s/monitoring/prometheus-adapter-config.yaml}
-
-\section{Skrypty automatyzujące}
-
-\subsection{deploy-k3s.sh — wdrożenie infrastruktury}
-
-Skrypt \texttt{scripts/deploy-k3s.sh} automatyzuje pełny proces wdrożenia:
-
-\begin{enumerate}
-  \item \textbf{Budowanie obrazów Docker} — buduje obrazy dla \texttt{cpu-service}, \texttt{io-service} i \texttt{echo-server}.
-  \item \textbf{Import do containerd k3s} — importuje obrazy do \textit{containerd} k3s przez \texttt{k3s ctr image import} (lub przez socket \texttt{containerd.sock}).
-  \item \textbf{Nakładanie manifestów} — tworzy namespace, wdraża monitoring (\textit{Prometheus}, \textit{Grafana}, \textit{Prometheus Adapter}), serwisy aplikacyjne z HPA, echo-server i \textit{Ingress}.
-  \item \textbf{Oczekiwanie na gotowość} — monitoruje \texttt{rollout status} dla każdego \textit{Deploymentu} (timeout 120\,s).
-\end{enumerate}
-
-Skrypt obsługuje podkomendy: \texttt{deploy} (pełny proces), \texttt{build-only}, \texttt{apply-only}, \texttt{clean}, \texttt{status}.
-
-\subsection{run-tests.sh — orkiestracja testów}
-
-Skrypt \texttt{scripts/run-tests.sh} (\~{}780 linii) automatyzuje wykonanie wszystkich 8 scenariuszy badawczych:
-
-\begin{enumerate}
-  \item \textbf{Port-forward} — uruchamia \texttt{kubectl port-forward} dla \texttt{cpu-service} (localhost:8080) i \texttt{io-service} (localhost:8081), weryfikuje health check.
-  \item \textbf{Pętla scenariuszy} — dla każdego z 8 scenariuszy:
-    \begin{enumerate}
-      \item Przełącza HPA na odpowiednią strategię (funkcja \texttt{switch\_hpa}).
-      \item Resetuje \textit{Deployment} do 1 repliki (funkcja \texttt{reset\_deployment}).
-      \item Uruchamia test \textit{k6} 5-krotnie (zmienna \texttt{REPETITIONS=5}).
-      \item Zapisuje wyniki do \texttt{results/<scenario>/}.
-    \end{enumerate}
-  \item \textbf{Cooldown} — po każdym scenariuszu: skaluje oba serwisy do 1 repliki, usuwa wszystkie HPA, czeka 120 sekund na stabilizację.
-  \item \textbf{Sprzątanie} — zatrzymuje port-forward.
-\end{enumerate}
-
-\lstinputlisting[
-  language=bash,
-  caption={Funkcja \texttt{switch\_hpa()} — przełączanie strategii HPA (plik \texttt{scripts/run-tests.sh})},
-  label={lst:switch-hpa},
-  firstline=137,
-  lastline=184
-]{../scripts/run-tests.sh}
-
-\lstinputlisting[
-  language=bash,
-  caption={Funkcja \texttt{cooldown()} — stabilizacja klastra między scenariuszami (plik \texttt{scripts/run-tests.sh})},
-  label={lst:cooldown},
-  firstline=202,
-  lastline=220
-]{../scripts/run-tests.sh}
-
-\subsection{run-all.sh — pełny pipeline}
-
-Skrypt \texttt{scripts/run-all.sh} łączy wdrożenie i testy w jednym wywołaniu: najpierw uruchamia \texttt{deploy-k3s.sh}, a następnie \texttt{run-tests.sh all}.
-
-\section{Scenariusze testowe k6}
-
-Każdy skrypt \textit{k6} definiuje scenariusze obciążeniowe oraz progi akceptacji (\textit{thresholds}):
-
-\subsection{cpu-load-test.js}
-
-\lstinputlisting[
-  language=javascript,
-  caption={Scenariusze i progi w \texttt{cpu-load-test.js}},
-  label={lst:k6-cpu-scenarios},
-  firstline=41,
-  lastline=72
-]{../tests/k6/cpu-load-test.js}
-
-\subsection{io-load-test.js}
-
-\lstinputlisting[
-  language=javascript,
-  caption={Scenariusze i progi w \texttt{io-load-test.js}},
-  label={lst:k6-io-scenarios},
-  firstline=36,
-  lastline=76
-]{../tests/k6/io-load-test.js}
-
-\subsection{combined-scenario.js}
-
-\lstinputlisting[
-  language=javascript,
-  caption={Scenariusze i progi w \texttt{combined-scenario.js}},
-  label={lst:k6-combined-scenarios},
-  firstline=45,
-  lastline=85
-]{../tests/k6/combined-scenario.js}
-
-\section{Podsumowanie implementacji}
-
-Zaimplementowany system badawczy składa się z czterech mikroserwisów (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}, \texttt{memory-service}), infrastruktury monitorującej (\textit{Prometheus}, \textit{Grafana}, \textit{Prometheus Adapter}) oraz zestawu skryptów automatyzujących wdrożenie i testy. Kluczowe cechy implementacji:
-
-\begin{itemize}
-  \item \textbf{Pełna automatyzacja} — od budowy obrazów przez wdrożenie na k3s po wykonanie wszystkich scenariuszy testowych.
-  \item \textbf{Powtarzalność} — każdy scenariusz testowy jest uruchamiany 5-krotnie, z cooldownem między scenariuszami.
-  \item \textbf{Odtwarzalność} — wszystkie manifesty są deklaratywne i niezależne od konkretnego klastra \textit{Kubernetes}.
-  \item \textbf{Obserwowalność} — metryki zbierane przez \textit{Prometheusa} i wizualizowane w \textit{Grafanie} umożliwiają szczegółową analizę zachowania systemu pod obciążeniem.
-\end{itemize}
+\section{Wdrożenie manifestów orkiestracji kontenerowej}
+\label{sec:implementacja_manifestow_k8s}
+Wszystkie zasoby klastra GKE są definiowane w sposób deklaratywny. Przykładową implementację obiektu typu \texttt{Deployment} dla serwisu obliczeniowego, zawierającą ścisłe limity zasobowe cgroups (\texttt{resources.limits}) oraz konfiguracje sond gotowości sieciowej, przedstawia listing \ref{lst:k8s_deployment_cpu}.
+
+\begin{lstlisting}[language=XML, caption={Manifest deklaratywny Deployment dla cpu-service na platformie GKE}, label={lst:k8s_deployment_cpu}]
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cpu-service
+  namespace: magisterka
+  labels:
+    app: cpu-service
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: cpu-service
+  template:
+    metadata:
+      labels:
+        app: cpu-service
+    spec:
+      containers:
+      - name: cpu-service
+        image: europe-west3-docker.pkg.dev/saas-project/gar/cpu-service:v1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+        resources:
+          requests:
+            cpu: "250m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+\end{lstlisting}
