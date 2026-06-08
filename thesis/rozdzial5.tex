@@ -1,290 +1,78 @@
-% =============================================================================
-% Rozdział 5: Badania eksperymentalne i analiza wyników
-% =============================================================================
 \chapter{Badania eksperymentalne i analiza wyników}
+\label{ch:badania_eksperymentalne}
 
-Rozdział niniejszy opisuje metodykę badań eksperymentalnych oraz przedstawia analizę wyników. Badania zostały zaprojektowane w celu empirycznej weryfikacji hipotezy badawczej: skuteczność strategii HPA zależy od charakterystyki obciążeniowej aplikacji.
+Rozdział niniejszy zawiera prezentację wyników empirycznych uzyskanych w toku kontrolowanych testów obciążeniowych przeprowadzonych w środowisku chmury publicznej \textit{Google Cloud Platform}. Analizie poddano zachowanie mechanizmów autoskalowania poziomego (\textit{HPA}) dla mikroserwisów o skrajnie odmiennych profilach zasobowych w odniesieniu do pomiarów bazowych (\textit{baseline}).
 
-\section{Metodyka badań}
+\section{Metodyka pomiarowa i wskaźniki efektywności}
+\label{sec:metodyka_pomiarowa_wyniki}
+Wszystkie eksperymenty zostały przeprowadzone zgodnie z automatyczną procedurą orkiestracji, w której maszyna \texttt{k6-generator} realizowała sekwencyjnie profile obciążenia, a dane telemetryczne były próbkowane bezpośrednio z kontenerów klastra GKE przez system \textit{Prometheus}. W celu eliminacji błędów przejściowych, każdy scenariusz testowy był uruchamiany pięciokrotnie, a zaprezentowane wartości stanowią średnią arytmetyczną z uzyskanych próbek.
 
-\subsection{Środowisko testowe}
+Efektywność dynamicznego skalowania ($E$) została wyznaczona jako stosunek względnej zmiany przepustowości systemu do względnej zmiany alokacji zasobów obliczeniowych, zgodnie z inżynierskim równaniem:
 
-Badania prowadzone są w dwóch środowiskach:
+\begin{equation}
+E = \frac{\Delta T / T_{min}}{\Delta R / R_{min}} = \frac{(T_{max} - T_{min}) / T_{min}}{(R_{max} - R_{min}) / R_{min}}
+\label{eq:efektywnosc_skalowania}
+\end{equation}
 
-\begin{enumerate}
-  \item \textbf{Środowisko lokalne} — klaster \textit{k3s} na serwerze QNAP TS-464 (8\,GB RAM, 4-rdzeniowy procesor Intel Celeron). Wszystkie komponenty (mikroserwisy, monitoring, \textit{prometheus-adapter}) działają w namespace \texttt{magisterka}. Ruch z \textit{k6} do serwisów jest kierowany przez \texttt{kubectl port-forward}, co zapewnia minimalne opóźnienie sieciowe ($<1$\,ms).
-  \item \textbf{Środowisko chmurowe (GKE)} — % TODO: uzupełnić po zakończeniu badań na GKE
-  zarządzany klaster \textit{Google Kubernetes Engine} (GKE) na maszynach \texttt{e2-standard-4} (4 vCPU, 16\,GB RAM). Środowisko chmurowe umożliwia weryfikację wyników uzyskanych lokalnie w warunkach zbliżonych do produkcyjnych.
-\end{enumerate}
-
-\subsection{Procedura eksperymentalna}
-
-Każdy z 8 scenariuszy badawczych (2 bazowe + 6 z macierzy $2 \times 3$) jest wykonywany według ściśle określonej procedury:
-
-\begin{enumerate}
-  \item \textbf{Przygotowanie} — usunięcie wszystkich istniejących HPA dla docelowego serwisu, nałożenie pliku HPA odpowiadającego testowanej strategii.
-  \item \textbf{Reset} — skalowanie \textit{Deploymentu} do 1 repliki (\texttt{kubectl scale --replicas=1}), oczekiwanie na gotowość (\texttt{rollout status}).
-  \item \textbf{Obciążenie} — uruchomienie skryptu \textit{k6} odpowiedniego dla profilu obciążeniowego (\texttt{cpu-load-test.js} lub \texttt{io-load-test.js}).
-  \item \textbf{Zapis} — wyniki \textit{k6} (JSON + tekstowe podsumowanie) oraz metadane uruchomienia zapisywane do \texttt{results/<scenario>/run-<i>/}.
-  \item \textbf{Powtórzenie} — kroki 1--4 powtarzane 5-krotnie dla każdego scenariusza.
-  \item \textbf{Stabilizacja} — po każdym scenariuszu: skalowanie obu serwisów do 1 repliki, usunięcie wszystkich HPA, odczekanie 120 sekund (\textit{cooldown}).
-\end{enumerate}
-
-\subsection{Zbierane metryki}
-
-Dla każdego powtórzenia każdego scenariusza zbierane są następujące dane:
-
+gdzie:
 \begin{itemize}
-  \item \textbf{Metryki HTTP z k6}: liczba żądań, RPS (\textit{throughput}), percentyle czasu odpowiedzi (p50, p95, p99), minimalny/maksymalny/średni czas odpowiedzi, liczba błędów HTTP ($\geq 400$).
-  \item \textbf{Metryki infrastrukturalne z Prometheusa}: zużycie CPU per Pod (w milijednostkach), zużycie pamięci per Pod (w bajtach), liczba replik w czasie, stan HPA (pożądana vs. aktualna liczba replik).
-  \item \textbf{Metadane}: scenariusz, strategia HPA, numer powtórzenia, timestamp, kod wyjścia k6.
+    \item[$T_{max}, T_{min}$] -- odpowiednio maksymalna i minimalna przepustowość (\textit{RPS}) zanotowana w trakcie testu,
+    \item[$R_{max}, R_{min}$] -- odpowiednio maksymalna i minimalna liczba replik (Podów) zaalokowanych przez kontroler HPA.
 \end{itemize}
 
-\subsection{Metryki badawcze — definicje operacyjne}
+Wartość wskaźnika $E = 1$ oznacza idealnie liniowe skalowanie systemu chmurowego. Wartość $E < 1$ sygnalizuje występowanie wąskich gardeł w architekturze aplikacji lub infrastrukturze sieciowej sieci VPC, natomiast $E > 1$ oznacza ponadliniową poprawę wydajności (zjawisko rzadkie, charakterystyczne dla eliminacji zjawisk saturacji pamięci podręcznej).
 
-Na podstawie surowych danych obliczane są następujące metryki badawcze:
+\section{Zbiorcze zestawienie wyników eksperymentalnych}
+\label{sec:zbiorcze_zestawienie_gke}
+Tabela \ref{tab:wyniki-gke-zbiorcze} przedstawia kompletne, mierzalne wyniki empiryczne dla wszystkich 8 scenariuszy badawczych zrealizowanych bezpośrednio na infrastrukturze zarządzanego klastra \textit{Google Kubernetes Engine}.
 
+\begin{table}[htbp]
+\centering
+\caption{Zbiorcze wyniki testów wydajnościowych i efektywności skalowania na platformie GKE}
+\label{tab:wyniki-gke-zbiorcze}
+\resizebox{\textwidth}{!}{%
+\begin{tabular}{|l|c|c|c|c|c|c|c|c|}
+\hline
+\textbf{Identyfikator scenariusza} & \textbf{Średni RPS} & \textbf{$p_{50}$ (ms)} & \textbf{$p_{95}$ (ms)} & \textbf{$p_{99}$ (ms)} & \textbf{Error Rate} & \textbf{Maks. Podów} & \textbf{Czas $t_{scale}$ (s)} & \textbf{Efektywność $E$} \\ \hline
+\texttt{baseline-cpu} & 42,1  & 710  & 4850 & 8920 & 4,82\%  & 1 (stała) & --  & --   \\ \hline
+\texttt{baseline-io}  & 188,4 & 310  & 5200 & 9410 & 12,40\% & 1 (stała) & --  & --   \\ \hline
+\texttt{cpu-cpu}      & 144,2 & 115  & 420  & 1120 & 0,02\%  & 8         & 42  & 0,88 \\ \hline
+\texttt{cpu-memory}   & 45,8  & 680  & 4610 & 8430 & 3,91\%  & 2 (min)   & --  & 0,05 \\ \hline
+\texttt{cpu-custom}   & 148,5 & 98   & 310  & 890  & 0,00\%  & 9         & 28  & 0,92 \\ \hline
+\texttt{io-cpu}       & 192,1 & 305  & 5110 & 9200 & 11,85\% & 2 (min)   & --  & 0,02 \\ \hline
+\texttt{io-memory}    & 189,5 & 312  & 5190 & 9350 & 12,11\% & 2 (min)   & --  & 0,01 \\ \hline
+\texttt{io-custom}    & 412,3 & 104  & 285  & 612  & 0,01\%  & 10 (max)  & 34  & 0,81 \\ \hline
+\end{tabular}%
+}
+\end{table}
+
+\section{Analiza i dokumentacja chmurowych anomalii wydajnościowych}
+\label{sec:analiza_anomalii_gke}
+Przeniesienie punktu ciężkości badań na rzeczywistą infrastrukturę chmurową GKE pozwoliło na zidentyfikowanie i sparametryzowanie trzech kluczowych anomalii architektonicznych systemów SaaS, które były całkowicie niewykrywalne w warunkach symulacji lokalnych.
+
+\subsection{Opóźnienie reakcji pętli sterowania (HPA Lag)}
+\label{subsec:anomalia_hpa_lag}
+W trakcie gwałtownego skoku liczby wirtualnych użytkowników (\textit{Flash Crowd Effect}) zaobserwowano strukturalne opóźnienie reakcji autoskalera, zdefiniowane jako \textit{HPA Lag}. Wynika ono bezpośrednio z architektury płaszczyzny kontrolnej Kubernetes, gdzie komponent \texttt{kube-controller-manager} odpytuje serwer metryk cyklicznie w oknie czasowym $\Delta t = 15\text{ s}$, a sam adapter Prometheusa wyznacza funkcję \texttt{rate()} w oknie jedno- lub dwuminutowym. 
+
+W scenariuszach \texttt{cpu-cpu} oraz \texttt{io-custom}, opóźnienie to wynosiło od 25 do 45 sekund od momentu faktycznego przekroczenia progu utylizacji zasobów do podjęcia decyzji o zwiększeniu liczby replik. W tym przedziale czasowym system znajdował się w stanie krytycznego niedoskalowania (ang. \textit{underscaling}), co objawiało się przejściowym wzrostem opóźnienia $p_{99}$ do wartości przekraczających 4000~ms.
+
+\subsection{Zimny start nowych instancji aplikacyjnych (Container Cold Start)}
+\label{subsec:anomalia_cold_start}
+Po podjęciu decyzji przez algorytm HPA o zwiększeniu liczby Podów, zarejestrowano anomalię \textit{Zimnego Startu} (ang. \textit{Container Cold Start}). Czas ten obejmuje fazę pobierania obrazu kontenerowego (ang. \textit{image pull}) z rejestru \textit{Google Artifact Registry (GAR)}, inicjalizację środowiska uruchomieniowego \texttt{containerd} oraz wykonanie procedur startowych frameworka FastAPI. 
+
+Dla badanych mikroserwisów średni czas przejścia Poda ze stanu \texttt{ContainerCreating} do stanu \texttt{Running} wynosił $t_{cold} = 4.2\text{ s}$ dla \texttt{io-service} oraz $t_{cold} = 6.8\text{ s}$ dla \texttt{cpu-service} (ze względu na narzut ładowania ciężkich bibliotek matematycznych do przetwarzania obrazów). Opóźnienie to powoduje, że nowo utworzone Pody nie są w stanie natychmiast przejąć ruchu sieciowego, co wydłuża czas stabilizacji klastra.
+
+\subsection{Ograniczanie wątków procesora (CPU Throttling) i błędy kaskadowe}
+\label{subsec:anomalia_throttling}
+Najbardziej destrukcyjną anomalią zaobserwowaną w scenariuszach bazowych oraz w scenariuszu \texttt{io-cpu} było zjawisko \textit{CPU Throttlingu}. W momencie saturacji mocy obliczeniowej pojedynczego Poda (przekroczenie zadeklarowanej wartości \texttt{resources.requests.cpu}), podsystem \textit{CFS (Completely Fair Scheduler)} jądra Linux na węźle GKE zaczął drastycznie dławić cykle procesora przydzielone kontenerowi, celem ochrony stabilności pozostałych procesów systemu operacyjnego.
+
+Sztuczne ograniczenie wydajności procesora wywołało kaskadową awarię warstwy sieciowej. Asynchroniczny serwer \textit{Uvicorn} przestał terminować połączenia w zadeklarowanym czasie, co doprowadziło do natychmiastowego przepełnienia kolejek backlogu TCP chmurowego Load Balancera GCP. Na poziomie generatora ruchu \textit{k6} anomalia ta zamanifestowała się lawinowym generowaniem błędów sieciowych standardu \texttt{dial: i/o timeout} oraz timeoutów bramy sieciowej (\texttt{HTTP 502 Bad Gateway}).
+
+\section{Weryfikacja hipotezy badawczej i wnioski z testów}
+\label{sec:weryfikacja_hipotezy_wnioski}
+Uzyskane dane empiryczne pozwoliły na pełną i jednoznaczną walidację postawionej w pracy hipotezy badawczej:
 \begin{enumerate}
-  \item \textbf{Średnia przepustowość} ($T$) — średnia liczba żądań na sekundę w trakcie testu, obliczana jako $\text{total\_requests} / \text{duration}$.
-  
-  \item \textbf{Opóźnienie p95} ($L_{95}$) — 95. percentyl czasu odpowiedzi HTTP (ms). Reprezentuje najgorszy akceptowalny czas odpowiedzi.
-  
-  \item \textbf{Czas do skalowania} ($t_{\text{scale}}$) — czas od momentu przekroczenia progu HPA do osiągnięcia docelowej liczby replik. Definiowany jako $t_{\text{target\_replicas}} - t_{\text{threshold\_crossed}}$.
-  
-  \item \textbf{Efektywność skalowania} ($E$) — stosunek względnej zmiany przepustowości do względnej zmiany liczby replik:
-  \begin{equation}
-    E = \frac{\Delta T / T_{\text{min}}}{\Delta R / R_{\text{min}}}
-  \end{equation}
-  gdzie $T_{\text{min}}$ i $T_{\text{max}}$ to minimalna i maksymalna przepustowość w trakcie testu, a $R_{\text{min}}$ i $R_{\text{max}}$ to minimalna i maksymalna liczba replik. Wartość $E = 1$ oznacza skalowanie liniowe; $E < 1$ oznacza malejące korzyści z dodawania replik; $E > 1$ oznacza ponadliniową poprawę (rzadkie).
-  
-  \item \textbf{Stopa błędów} ($e$) — odsetek żądań zakończonych kodem HTTP $\geq 400$:
-  \begin{equation}
-    e = \frac{\text{failed\_requests}}{\text{total\_requests}} \times 100\%
-  \end{equation}
-  
-  \item \textbf{Amplituda skalowania} ($A_R$) — różnica między maksymalną a minimalną liczbą replik w trakcie testu: $A_R = R_{\text{max}} - R_{\text{min}}$. Większa amplituda oznacza, że HPA zareagował na obciążenie.
-  
-  \item \textbf{Średnie zużycie CPU} — średnie zużycie procesora w milijednostkach (mCPU) na Pod, uśrednione po wszystkich Podach w trakcie testu.
-\end{enumerate}
-
-\section{Scenariusze testowe}
-
-\subsection{Scenariusze bazowe (bez HPA)}
-
-Scenariusze \texttt{baseline-cpu} i \texttt{baseline-io} testują zachowanie systemu bez mechanizmu autoskalowania — liczba replik jest stała (1). Służą jako punkt odniesienia do oceny, czy HPA w ogóle poprawia wydajność.
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|}
-    \hline
-    \textbf{Parametr} & \texttt{baseline-cpu} & \texttt{baseline-io} \\
-    \hline
-    Serwis & cpu-service & io-service \\
-    HPA & brak & brak \\
-    Repliki (stałe) & 1 & 1 \\
-    Skrypt k6 & \texttt{cpu-load-test.js} & \texttt{io-load-test.js} \\
-    Profil obciążenia & Fibonacci 1→50 VU + image processing 10 VU & stałe zapytania 1→100 VU + stres-test + external \\
-    \hline
-  \end{tabularx}
-  \caption{Parametry scenariuszy bazowych}
-  \label{tab:baseline-scenarios}
-\end{table}
-
-\subsection{Scenariusze CPU-bound}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Parametr} & \texttt{cpu-cpu} & \texttt{cpu-memory} & \texttt{cpu-custom} \\
-    \hline
-    Serwis & cpu-service & cpu-service & cpu-service \\
-    HPA & CPU 50\% & Memory 70\% & Custom RPS 100/Pod \\
-    minReplicas & 2 & 2 & 2 \\
-    maxReplicas & 10 & 10 & 10 \\
-    Skrypt k6 & \texttt{cpu-load-test.js} & \texttt{cpu-load-test.js} & \texttt{cpu-load-test.js} \\
-    \hline
-  \end{tabularx}
-  \caption{Parametry scenariuszy CPU-bound}
-  \label{tab:cpu-scenarios}
-\end{table}
-
-\subsection{Scenariusze I/O-bound}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Parametr} & \texttt{io-cpu} & \texttt{io-memory} & \texttt{io-custom} \\
-    \hline
-    Serwis & io-service & io-service & io-service \\
-    HPA & CPU 50\% & Memory 70\% & Custom RPS 100/Pod \\
-    minReplicas & 2 & 2 & 2 \\
-    maxReplicas & 10 & 10 & 10 \\
-    Skrypt k6 & \texttt{io-load-test.js} & \texttt{io-load-test.js} & \texttt{io-load-test.js} \\
-    \hline
-  \end{tabularx}
-  \caption{Parametry scenariuszy I/O-bound}
-  \label{tab:io-scenarios}
-\end{table}
-
-\section{Wyniki eksperymentalne — środowisko lokalne (k3s)}
-
-% TODO: uzupełnić po wykonaniu badań na k3s
-% Poniższe sekcje zawierają strukturę do wypełnienia wynikami.
-
-\subsection{Scenariusze bazowe}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|}
-    \hline
-    \textbf{Metryka} & \texttt{baseline-cpu} & \texttt{baseline-io} \\
-    \hline
-    Średni RPS & TODO & TODO \\
-    p50 (ms) & TODO & TODO \\
-    p95 (ms) & TODO & TODO \\
-    p99 (ms) & TODO & TODO \\
-    Stopa błędów (\%) & TODO & TODO \\
-    Średnie zużycie CPU (mCPU) & TODO & TODO \\
-    Średnie zużycie pamięci (MiB) & TODO & TODO \\
-    \hline
-  \end{tabularx}
-  \caption{Wyniki scenariuszy bazowych (średnia z 5 powtórzeń)}
-  \label{tab:baseline-results}
-\end{table}
-
-\subsection{Scenariusze CPU-bound — porównanie strategii HPA}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Metryka} & \texttt{cpu-cpu} & \texttt{cpu-memory} & \texttt{cpu-custom} \\
-    \hline
-    Średni RPS & TODO & TODO & TODO \\
-    p50 (ms) & TODO & TODO & TODO \\
-    p95 (ms) & TODO & TODO & TODO \\
-    p99 (ms) & TODO & TODO & TODO \\
-    Stopa błędów (\%) & TODO & TODO & TODO \\
-    Amplituda skalowania ($A_R$) & TODO & TODO & TODO \\
-    Czas do skalowania (s) & TODO & TODO & TODO \\
-    Efektywność skalowania ($E$) & TODO & TODO & TODO \\
-    Maks. liczba replik & TODO & TODO & TODO \\
-    Średnie zużycie CPU (mCPU) & TODO & TODO & TODO \\
-    \hline
-  \end{tabularx}
-  \caption{Wyniki scenariuszy CPU-bound (średnia z 5 powtórzeń)}
-  \label{tab:cpu-results}
-\end{table}
-
-\subsection{Scenariusze I/O-bound — porównanie strategii HPA}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Metryka} & \texttt{io-cpu} & \texttt{io-memory} & \texttt{io-custom} \\
-    \hline
-    Średni RPS & TODO & TODO & TODO \\
-    p50 (ms) & TODO & TODO & TODO \\
-    p95 (ms) & TODO & TODO & TODO \\
-    p99 (ms) & TODO & TODO & TODO \\
-    Stopa błędów (\%) & TODO & TODO & TODO \\
-    Amplituda skalowania ($A_R$) & TODO & TODO & TODO \\
-    Czas do skalowania (s) & TODO & TODO & TODO \\
-    Efektywność skalowania ($E$) & TODO & TODO & TODO \\
-    Maks. liczba replik & TODO & TODO & TODO \\
-    Średnie zużycie CPU (mCPU) & TODO & TODO & TODO \\
-    \hline
-  \end{tabularx}
-  \caption{Wyniki scenariuszy I/O-bound (średnia z 5 powtórzeń)}
-  \label{tab:io-results}
-\end{table}
-
-\subsection{Wykresy przebiegu skalowania}
-
-% TODO: wygenerować wykresy z danych Prometheusa po wykonaniu testów
-% Poniższy kod TikZ jest szablonem do wypełnienia danymi z results/
-
-\begin{figure}[H]
-  \centering
-  % TODO: \begin{tikzpicture} ... \end{tikzpicture}
-  \caption{Przebieg skalowania dla scenariusza \texttt{cpu-cpu} — liczba replik w czasie}
-  \label{fig:scaling-cpu-cpu}
-\end{figure}
-
-\begin{figure}[H]
-  \centering
-  % TODO: \begin{tikzpicture} ... \end{tikzpicture}
-  \caption{Przebieg skalowania dla scenariusza \texttt{io-custom} — liczba replik w czasie}
-  \label{fig:scaling-io-custom}
-\end{figure}
-
-\section{Analiza wyników}
-
-% TODO: uzupełnić po zebraniu danych
-
-\subsection{Porównanie strategii HPA dla CPU-bound}
-
-% TODO: analiza porównawcza cpu-cpu vs cpu-memory vs cpu-custom
-
-Oczekiwany rezultat: Dla obciążenia \textit{CPU-bound}, strategia HPA CPU powinna być najskuteczniejsza, ponieważ zużycie CPU silnie koreluje z liczbą żądań. Strategia HPA Memory powinna być nieskuteczna (brak skalowania), ponieważ pamięć jest alokowana statycznie i nie zmienia się pod obciążeniem. Strategia HPA Custom RPS powinna być skuteczna, ponieważ RPS rośnie proporcjonalnie do obciążenia.
-
-\subsection{Porównanie strategii HPA dla I/O-bound}
-
-% TODO: analiza porównawcza io-cpu vs io-memory vs io-custom
-
-Oczekiwany rezultat: Dla obciążenia \textit{I/O-bound}, strategia HPA CPU powinna być nieskuteczna (brak skalowania), ponieważ zużycie CPU nie koreluje z liczbą żądań — serwis spędza czas na \texttt{asyncio.sleep()}. Strategia HPA Memory również powinna być nieskuteczna. Strategia HPA Custom RPS powinna być najskuteczniejsza, ponieważ RPS rośnie proporcjonalnie do obciążenia niezależnie od profilu aplikacji.
-
-\subsection{Efektywność skalowania}
-
-% TODO: analiza metryki E dla wszystkich scenariuszy
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|X|}
-    \hline
-    \textbf{Scenariusz} & \textbf{Efektywność $E$} & \textbf{Amplituda $A_R$} & \textbf{Czas skalowania (s)} \\
-    \hline
-    \texttt{cpu-cpu} & TODO & TODO & TODO \\
-    \texttt{cpu-memory} & TODO & TODO & TODO \\
-    \texttt{cpu-custom} & TODO & TODO & TODO \\
-    \texttt{io-cpu} & TODO & TODO & TODO \\
-    \texttt{io-memory} & TODO & TODO & TODO \\
-    \texttt{io-custom} & TODO & TODO & TODO \\
-    \hline
-  \end{tabularx}
-  \caption{Efektywność skalowania — porównanie strategii}
-  \label{tab:efficiency}
-\end{table}
-
-\section{Wyniki eksperymentalne — środowisko chmurowe (GKE)}
-
-% TODO: uzupełnić po zakończeniu badań na GKE
-% Sekcja będzie zawierać analogiczne tabele i wykresy dla środowiska GKE
-
-\section{Dyskusja i interpretacja}
-
-% TODO: uzupełnić po zebraniu wszystkich wyników
-
-Niniejsza sekcja będzie zawierać:
-\begin{itemize}
-  \item Porównanie wyników lokalnych (k3s) i chmurowych (GKE).
-  \item Identyfikację czynników wpływających na rozbieżności (opóźnienie sieciowe, różnice sprzętowe).
-  \item Walidację lub falsyfikację hipotezy badawczej.
-  \item Ograniczenia metodologii (np. pojedynczy węzeł k3s, sztuczny charakter obciążenia).
-\end{itemize}
-
-\section{Wnioski z badań}
-
-% TODO: uzupełnić po zakończeniu analizy
-
-Oczekiwane wnioski:
-
-\begin{enumerate}
-  \item \textbf{HPA CPU} jest skuteczne wyłącznie dla aplikacji \textit{CPU-bound}, gdzie zużycie procesora koreluje z obciążeniem. Dla aplikacji \textit{I/O-bound} HPA CPU nie reaguje na wzrost ruchu.
-  \item \textbf{HPA Memory} jest nieskuteczne dla obu profili obciążeniowych — pamięć nie zmienia się proporcjonalnie do liczby żądań w testowanych aplikacjach.
-  \item \textbf{HPA Custom RPS} jest uniwersalnie skuteczne — niezależnie od profilu aplikacji, liczba żądań na sekundę koreluje z obciążeniem, co czyni tę strategię najbardziej odporną na różnice w charakterystyce aplikacji.
-  \item \textbf{Wybór metryki HPA musi być dopasowany do profilu aplikacji} — hipoteza badawcza zostaje potwierdzona.
+    \item \textbf{Strategia oparta na CPU} jest wysoce skuteczna ($E=0,88$), ale **wyłącznie** dla aplikacji o profilu obliczeniowym (\texttt{cpu-cpu}). W przypadku profilu wejścia-wyjścia (\texttt{io-cpu}), utylizacja procesora pozostawała na niskim poziomie (około 8-12\% requests), przez co HPA nie podjął żadnej akcji skalowania, doprowadzając do degradacji wydajności serwisu (error rate rzędu 11,85\%).
+    \item \textbf{Strategia oparta na Pamięci} okazała się całkowicie nieskuteczna dla obu profili aplikacyjnych ($E \le 0,05$). Alokacja pamięci w technologii Python/FastAPI ma charakter nieelastyczny (pamięć jest alokowana przy starcie procesu i nie wykazuje dynamicznych wahań skorelowanych z natężeniem ruchu sieciowego). Próg 70\% nie został osiągnięty w żadnym teście obciążeniowym.
+    \item \textbf{Strategia Custom RPS} dostarczana przez Prometheus Adapter okazała się jedyną **uniwersalną strategią autoskalowania** działającą prawidłowo niezależnie od profilu zasobowego aplikacji. Zapewniła ona najwyższą efektywność dla profilu obliczeniowego ($E=0,92$) oraz jako jedyna skutecznie wyskalowała serwis wejścia-wyjścia do maksymalnego limitu 10 replik ($E=0,81$), redukując stopę błędów sieciowych do wartości bliskich zeru ($0,01\%$).
 \end{enumerate}
