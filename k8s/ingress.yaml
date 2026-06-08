@@ -6,24 +6,19 @@ metadata:
   labels:
     app: magisterka
   annotations:
-    traefik.ingress.kubernetes.io/router.entrypoints: web
+    kubernetes.io/ingress.class: "gce"
 spec:
-  ingressClassName: traefik
   rules:
-    - host: cpu-magisterka.k3s.local
-      http:
+    - http:
         paths:
-          - path: /
+          - path: /cpu
             pathType: Prefix
             backend:
               service:
                 name: cpu-service
                 port:
                   number: 80
-    - host: io-magisterka.k3s.local
-      http:
-        paths:
-          - path: /
+          - path: /io
             pathType: Prefix
             backend:
               service:
