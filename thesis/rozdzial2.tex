@@ -1,251 +1,75 @@
-% =============================================================================
-% Rozdział 2: Przegląd technologii
-% =============================================================================
-\chapter{Przegląd technologii}
+\chapter{Przegląd technologii chmurowych i narzędzi pomiarowych}
+\label{ch:przeglad_technologii}
 
-Rozdział niniejszy przedstawia technologie wykorzystane w projekcie badawczym, ich architekturę, kluczowe cechy oraz uzasadnienie wyboru każdego komponentu.
+Rozdział niniejszy przedstawia szczegółową specyfikację oraz analizę technologiczną komponentów wchodzących w skład produkcyjnego środowiska badawczego. Wszystkie wybrane rozwiązania zostały dobrane pod kątem ich natywnego wsparcia dla architektur mikroserwisowych oraz możliwości precyzyjnej rejestracji metryk wydajnościowych w warunkach dynamicznych zmian obciążenia sieciowego.
 
-\section{Kubernetes jako platforma orkiestracji}
+\section{Platforma orkiestracji Google Kubernetes Engine (GKE)}
+\label{sec:gke_architektura}
+Podstawowym środowiskiem uruchomieniowym dla badanych mikroserwisów chmurowych typu SaaS jest platforma \textit{Google Kubernetes Engine (GKE)} działająca w trybie \textit{Standard} w ramach chmury publicznej \textit{Google Cloud Platform (GCP)}. Odstąpiono od wstępnych założeń implementacji lokalnej w oparciu o dystrybucje \textit{Minikube} lub \textit{k3s}, ponieważ lokalne środowiska zwirtualizowane nie odwzorowują w sposób dostateczny rzeczywistych opóźnień sieciowych warstwy routingu chmurowego, fizycznego czasu alokacji zasobów dyskowych oraz dynamicznej charakterystyki działania płaszczyzny kontrolnej (ang. \textit{Control Plane}).
 
-\subsection{Architektura}
+Architektura zarządzana GKE zapewnia pełną izolację komponentów sterujących od puli węzłów wykonawczych (ang. \textit{Worker Nodes}). Płaszczyzna kontrolna realizuje zadania związane z utrzymaniem stanu klastra poprzez rozproszony rejestr \texttt{etcd}, harmonogramowaniem zasobów (\texttt{kube-scheduler}) oraz orkiestracją replik za pomocą mechanizmu \texttt{kube-controller-manager}. 
 
-\textit{Kubernetes} (K8s) jest otwartoźródłową platformą do orkiestracji kontenerów, zarządzającą cyklem życia aplikacji w klastrze maszyn. Architektura \textit{Kubernetes} dzieli się na dwie główne warstwy:
+Węzły wykonawcze klastra zostały oparte na instancjach maszyn wirtualnych \textit{Google Compute Engine} typu \texttt{e2-standard-4}. Każda z maszyn fizycznych dysponuje 4 wirtualnymi rdzeniami procesora (vCPU) oraz 16~GB pamięci RAM, co gwarantuje stabilność metryczną i eliminuje interferencję zasobową (ang. \textit{noisy neighbor effect}). Środowiskiem uruchomieniowym kontenerów jest \texttt{containerd} działający pod kontrolą systemu operacyjnego \textit{Container-Optimized OS (COS)}. Szczegółowe zestawienie parametrów środowiska GKE przedstawiono w tabeli \ref{tab:gke-specyfikacja}.
 
-\textbf{Control Plane} — warstwa sterowania odpowiedzialna za utrzymanie stanu klastra:
-\begin{itemize}
-  \item \texttt{kube-apiserver} — centralny punkt komunikacji, wystawia API \textit{Kubernetes} (REST).
-  \item \texttt{etcd} — rozproszony magazyn klucz-wartość przechowujący cały stan klastra.
-  \item \texttt{kube-scheduler} — przypisuje nowe Pody do węzłów na podstawie dostępnych zasobów i reguł.
-  \item \texttt{kube-controller-manager} — uruchamia kontrolery, w tym \textit{HorizontalPodAutoscaler}, \textit{ReplicaSet controller} i inne.
-\end{itemize}
+\begin{table}[ht]
+\centering
+\caption{Specyfikacja techniczna produkcyjnego środowiska badawczego GKE}
+\label{tab:gke-specyfikacja}
+\begin{tabular}{|l|l|}
+\hline
+\textbf{Komponent infrastruktury} & \textbf{Konfiguracja i parametry techniczne} \\ \hline
+Typ maszyn wirtualnych węzłów    & \texttt{e2-standard-4} (Google Compute Engine) \\ \hline
+Zasoby pojedynczego węzła        & 4 vCPU (architektura x86\_64), 16 GB RAM \\ \hline
+Wersja płaszczyzny kontrolnej    & Kubernetes v1.29.x (Regular Release Channel) \\ \hline
+Środowisko wykonawcze kontenerów & \texttt{containerd} v1.7.x \\ \hline
+System operacyjny węzłów         & \textit{Container-Optimized OS} zarządzany przez Google \\ \hline
+Topologia sieciowa klastra       & Sieć \textit{VPC-native} oparta na aliasach adresów IP \\ \hline
+\end{tabular}
+\end{table}
 
-\textbf{Worker Nodes} — węzły wykonawcze:
-\begin{itemize}
-  \item \texttt{kubelet} — agent zarządzający Podami na węźle, komunikuje się z \textit{API server}.
-  \item \texttt{kube-proxy} — zarządza regułami sieciowymi, implementuje \textit{Service} abstrakcję.
-  \item \texttt{container runtime} — uruchamia kontenery (np. \textit{containerd}, \textit{CRI-O}).
-\end{itemize}
-
-\subsection{Kluczowe obiekty API}
-
-\begin{itemize}
-  \item \textbf{Pod} — najmniejsza jednostka obliczeniowa; grupa kontenerów ze współdzieloną przestrzenią sieciową i woluminami.
-  \item \textbf{Deployment} — deklaratywne zarządzanie replikami Podów z \textit{rolling updates} i \textit{rollback}.
-  \item \textbf{Service} — stabilny punkt dostępowy (ClusterIP, NodePort, LoadBalancer) do zestawu Podów.
-  \item \textbf{ConfigMap} i \textbf{Secret} — zewnętrzna konfiguracja aplikacji.
-  \item \textbf{HorizontalPodAutoscaler} — automatyczne skalowanie liczby replik na podstawie metryk.
-  \item \textbf{Namespace} — logiczna izolacja zasobów w klastrze.
-\end{itemize}
-
-\subsection{HorizontalPodAutoscaler (HPA) — szczegółowo}
-
-HPA okresowo (domyślnie co 15 sekund) pobiera wartości metryk dla Podów w \textit{Deploymencie} i oblicza pożądaną liczbę replik. Algorytm skalowania:
+\section{Automatyczny system skalowania poziomego (HPA)}
+\label{sec:hpa_mechanizm}
+Mechanizm \textit{Horizontal Pod Autoscaler (HPA)} odpowiada za dynamiczne dostosowywanie liczby replik kontenerów w ramach obiektów typu \texttt{Deployment} na podstawie analizy sygnałów telemetrycznych. Algorytm decyzyjny HPA wykonuje cykliczne obliczenia (domyślnie co 15 sekund) w oparciu o ogólny wzór matematyczny:
 
 \begin{equation}
-  \text{desiredReplicas} = \left\lceil \text{currentReplicas} \times \frac{\text{currentMetricValue}}{\text{desiredMetricValue}} \right\rceil
+R_{desired} = \lceil R_{current} \times \frac{M_{current}}{M_{desired}} \rceil
+\label{eq:hpa_wzor}
 \end{equation}
 
-Dodatkowo, HPA implementuje mechanizmy stabilizacyjne:
+gdzie:
 \begin{itemize}
-  \item \textbf{Scale-down stabilization window} — domyślnie 5 minut (300 s); HPA czeka tyle czasu przed podjęciem decyzji o skalowaniu w dół, uwzględniając maksymalną wartość replik z tego okna.
-  \item \textbf{Tolerance} — domyślnie 10\%; metryka musi odchylić się o więcej niż 10\% od progu, aby wywołać skalowanie.
-  \item \textbf{Cooldown/scaling policies} — od wersji \texttt{autoscaling/v2} można definiować polityki ograniczające tempo skalowania (np. maksymalnie 2 repliki na 60 sekund).
+    \item[$R_{desired}$] -- wyznaczona, pożądana liczba replik,
+    \item[$R_{current}$] -- aktualna liczba uruchomionych Podów,
+    \item[$M_{current}$] -- bieżąca średnia wartość rejestrowanej metryki wydajnościowej,
+    \item[$M_{desired}$] -- zdefiniowana przez administratora wartość progowa metryki targetowej.
 \end{itemize}
 
-\section{k3s — lekka dystrybucja Kubernetes}
-
-\subsection{Charakterystyka}
-
-\textit{k3s} (wymawiane ,,k3s'', nie ,,k-three-s'') jest certyfikowaną przez CNCF dystrybucją \textit{Kubernetes} opracowaną przez \textit{Rancher Labs} (obecnie \textit{SUSE}). Została zaprojektowana dla środowisk o ograniczonych zasobach — \textit{edge computing}, IoT, laboratoria deweloperskie.
-
-\subsection{Różnice względem standardowego Kubernetes}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|}
-    \hline
-    \textbf{Aspekt} & \textbf{k3s} & \textbf{Kubernetes (standardowy)} \\
-    \hline
-    Rozmiar binarki & $<$ 100 MB & $>$ 1 GB (suma komponentów) \\
-    Baza stanu & SQLite (domyślnie) / osadzony etcd & etcd (klaster) \\
-    Container runtime & containerd (wbudowany) & containerd / CRI-O (osobno) \\
-    Instalacja & Jeden binarny plik + systemd unit & kubeadm / kubespray (wiele kroków) \\
-    Zależności & Brak (wszystko w binarnym) & etcd, container runtime, CNI \\
-    \hline
-  \end{tabularx}
-  \caption{Porównanie \textit{k3s} i standardowego \textit{Kubernetes}}
-  \label{tab:k3s-comparison}
-\end{table}
-
-\subsection{Uzasadnienie wyboru}
-
-W niniejszej pracy \textit{k3s} został wybrany z następujących powodów:
-\begin{itemize}
-  \item \textbf{Ograniczone zasoby sprzętowe} — eksperymenty prowadzone na QNAP NAS z 8 GB RAM; \textit{k3s} zużywa znacząco mniej pamięci niż standardowy \textit{Kubernetes}.
-  \item \textbf{Prostota instalacji} — instalacja sprowadza się do jednego polecenia: \texttt{curl -sfL https://get.k3s.io | sh -}.
-  \item \textbf{Pełna zgodność API} — \textit{k3s} jest certyfikowany przez CNCF, co oznacza, że wszystkie manifesty \textit{Kubernetes} (Deployment, HPA, Service) działają identycznie jak na standardowym klastrze.
-  \item \textbf{Niskie zużycie dysku} — \textit{k3s} usuwa nieużywane w mniejszych środowiskach \textit{admission plugins} i kontrolery, redukując rozmiar instalacji.
-\end{itemize}
-
-\section{Prometheus i Grafana — stos monitorujący}
-
-\subsection{Prometheus}
-
-\textit{Prometheus} jest otwartoźródłowym systemem monitorowania i alertowania, pierwotnie opracowanym w \textit{SoundCloud}, obecnie inkubowanym przez CNCF. Architektura \textit{Prometheusa} opiera się na:
-
-\begin{itemize}
-  \item \textbf{Modelu pull} — \textit{Prometheus} aktywnie pobiera (\textit{scrape}) metryki z aplikacji poprzez HTTP w interwałach (w niniejszym projekcie: 15 s).
-  \item \textbf{TSDB} (\textit{Time Series Database}) — natywna baza szeregów czasowych przechowująca dane z etykietami (\textit{labels}).
-  \item \textbf{PromQL} — funkcyjny język zapytań umożliwiający agregacje, operacje na zakresach czasowych, predykcję.
-  \item \textbf{Service Discovery} — automatyczne wykrywanie celów (\textit{targets}) do scrapowania przez integrację z API \textit{Kubernetes}.
-\end{itemize}
-
-W projekcie \textit{Prometheus} pełni podwójną rolę:
+W specyfikacji standardu API \texttt{autoscaling/v2} mechanizm HPA wspiera skalowanie przy użyciu trzech odmiennych typów metryk:
 \begin{enumerate}
-  \item Zbiera metryki infrastrukturalne z \textit{Kubernetes} (CPU, RAM, liczba replik) poprzez \texttt{kubernetes-sd}.
-  \item Zbiera niestandardowe metryki aplikacyjne z \texttt{cpu-service} i \texttt{io-service} (RPS, czas przetwarzania, liczba aktywnych zapytań).
-  \item Udostępnia te metryki przez API dla \textit{prometheus-adapter}, który przekształca je na format zrozumiały dla HPA \textit{Kubernetes}.
+    \item \textbf{Metryki zasobowe (Resource Metrics):} wyznaczane jako procentowe zużycie CPU lub pamięci RAM w odniesieniu do wartości deklaratywnej \texttt{resources.requests}. Sygnały te są dostarczane przez komponent \texttt{metrics-server}.
+    \item \textbf{Metryki niestandardowe (Custom Metrics):} parametry aplikacyjne powiązane bezpośrednio z obiektami Kubernetes (np. intensywność ruchu sieciowego RPS), pobierane z zewnętrznych systemów monitorowania poprzez rozszerzenie \texttt{Custom Metrics API}.
+    \hline
+    \item \textbf{Metryki zewnętrzne (External Metrics):} parametry niezwiązane bezpośrednio z obiektami klastra, pobierane z zewnętrznych usług chmurowych (np. długość kolejki wiadomości Pub/Sub).
 \end{enumerate}
 
-\subsection{Grafana}
+\section{Zintegrowany stos monitorujący kube-prometheus-stack}
+\label{sec:telemetria_stos}
+Akwizycja danych pomiarowych w środowisku chmurowym realizowana jest w sposób w pełni zautomatyzowany przy użyciu zintegrowanego stosu \textit{kube-prometheus-stack}, zainstalowanego w klastrze GKE za pomocą menedżera pakietów \textit{Helm}. System rezygnuje z nieefektywnej i podatnej na błędy ręcznej agregacji danych pomiarowych z logów terminala.
 
-\textit{Grafana} jest platformą do wizualizacji danych i tworzenia \textit{dashboardów}, integrującą się z wieloma źródłami danych (m.in. \textit{Prometheus}, \textit{InfluxDB}, \textit{Elasticsearch}). W projekcie wykorzystano:
+\subsection{Baza danych Prometheus i mechanizmy SD}
+\label{subsec:prometheus}
+Sercem systemu telemetrii jest baza danych szeregów czasowych \textit{Prometheus (TSDB)}. Kolekcjonowanie danych odbywa się za pomocą modelu ciągnionego (\textit{pull-model}), w którym serwer monitorujący wykonuje asynchroniczne zapytania HTTP do punktów końcowych \texttt{/metrics} z interwałem próbkowania wynoszącym $\Delta t = 5\text{ s}$. 
 
-\begin{itemize}
-  \item \textbf{Dashboard ,,Magisterka — System Overview''} — 16 paneli pokazujących kluczowe metryki: RPS, zużycie CPU per Pod, latency p50/p95/p99, liczbę Podów, stan HPA.
-  \item \textbf{Anonimowy dostęp} — uproszczony dostęp do dashboardu w środowisku testowym bez konieczności uwierzytelniania.
-  \item \textbf{Dostęp przez port-forward} — Grafana udostępniana lokalnie przez \texttt{kubectl port-forward}, eliminując potrzebę zewnętrznego \textit{LoadBalancera}.
-\end{itemize}
+Automatyczne wykrywanie celów pomiarowych (ang. \textit{Service Discovery}) realizowane jest za pomocą mechanizmu \texttt{kubernetes\_sd\_configs}, który analizuje adnotacje kontenerów i dynamicznie rejestruje instancje mikroserwisów. Infrastruktura zbiera pełne metryki systemowe z demonów \textit{cAdvisor} (statystyki zużycia CPU i pamięci kontenerów na poziomie jądra Linux) oraz \textit{kube-state-metrics} (statusy obiektów orkiestracji).
 
-\subsection{Prometheus Adapter}
+\subsection{Prometheus Adapter v0.12.0}
+\label{subsec:adapter}
+Komponent \textit{Prometheus Adapter} pełni rolę mostu translacyjnego pomiędzy bazą danych Prometheus a natywnym mechanizmem HPA klastra GKE. Rejestruje się on w architekturze jako usługa \texttt{APIService}, rozszerzając standardowe API Kubernetes o ścieżkę \texttt{/apis/custom.metrics.k8s.io/}. Adapter pobiera chwilowe wartości liczników za pomocą języka zapytań \textit{PromQL}, przekształca je (np. stosując funkcję \texttt{rate()} w oknie czasowym) i serwuje w formacie zrozumiałym dla algorytmu autoskalera.
 
-\textit{Prometheus Adapter} (\texttt{registry.k8s.io/prometheus-adapter/prometheus-adapter:v0.12.0}) jest komponentem implementującym \textit{Kubernetes Custom Metrics API} i \textit{External Metrics API}. Jego rola polega na:
+\subsection{Platforma wizualizacyjna Grafana}
+\label{subsec:grafana}
+Platforma \textit{Grafana} służy jako centralny punkt prezentacji danych empirycznych oraz weryfikacji przebiegu eksperymentów. Usługa Grafana została wystawiona na zewnątrz klastra GKE przy użyciu publicznego mechanizmu równoważenia obciążenia chmury GCP (\texttt{type: LoadBalancer}), co umożliwia bezpieczny dostęp do dedykowanego panelu \textit{SaaS Wydajność Overview} i automatyczny eksport danych telemetrycznych.
 
-\begin{enumerate}
-  \item Rejestracji jako \textit{APIService} w \textit{Kubernetes}, rozszerzając API o ścieżki \texttt{/apis/custom.metrics.k8s.io/}.
-  \item Pobieraniu metryk z \textit{Prometheusa} poprzez zapytania \textit{PromQL}.
-  \item Serwowaniu tych metryk w formacie oczekiwanym przez HPA.
-\end{enumerate}
-
-Konfiguracja adaptera jest przechowywana w \texttt{ConfigMap} (\texttt{prometheus-adapter-config}) i zawiera reguły mapowania metryk \textit{Prometheusa} na metryki \textit{Kubernetes}. Przykładowa reguła dla CPU-service:
-
-\begin{lstlisting}[language=yaml, caption={Reguła mapowania \textit{Prometheus Adapter} dla RPS CPU-service}, label={lst:adapter-rule}]
-- seriesQuery: 'cpu_service_http_requests_total{namespace!="",pod!=""}'
-  resources:
-    overrides:
-      namespace: {resource: "namespace"}
-      pod: {resource: "pod"}
-  name:
-    matches: "cpu_service_http_requests_total"
-    as: "http_requests_per_second"
-  metricsQuery: 'sum(rate(cpu_service_http_requests_total{
-    <<.LabelMatchers>>}[1m])) by (<<.GroupBy>>)'
-\end{lstlisting}
-
-\section{k6 — narzędzie do testów obciążeniowych}
-
-\subsection{Charakterystyka}
-
-\textit{k6} (\textit{Grafana k6}) jest otwartoźródłowym narzędziem do testów obciążeniowych, napisanym w \textit{Go} z interfejsem skryptowym w \textit{JavaScript}. Kluczowe cechy \textit{k6}:
-
-\begin{itemize}
-  \item \textbf{Skryptowalność} — testy definiowane w \textit{JavaScript} (ES6), z dostępem do modułów \texttt{http}, \texttt{check}, \texttt{sleep}, \texttt{encoding}.
-  \item \textbf{Executory} — różne modele obciążenia: \texttt{ramping-vus} (stopniowa zmiana liczby VU), \texttt{constant-vus} (stała liczba VU), \texttt{per-vu-iterations}.
-  \item \textbf{Thresholds} — progi akceptacji (np. \texttt{p(95) < 10000}) których przekroczenie oznacza niepowodzenie testu.
-  \item \textbf{Wydajność} — pojedyncza instancja \textit{k6} generuje setki–tysiące VU (\textit{Virtual Users}) bez potrzeby rozproszonej architektury.
-  \item \textbf{Wyniki} — eksport do JSON, CSV, integracja z \textit{Prometheus} (przez \texttt{--out statsd}).
-\end{itemize}
-
-\subsection{Scenariusze k6 w projekcie}
-
-W projekcie zdefiniowano trzy skrypty k6:
-
-\begin{itemize}
-  \item \texttt{cpu-load-test.js} — dwa scenariusze: Fibonacci (ramp-up 1→50 VU, steady 120 s) oraz przetwarzanie obrazu (stałe 10 VU).
-  \item \texttt{io-load-test.js} — trzy scenariusze: zapytania ze stałym opóźnieniem (ramp-up 1→100 VU), test obciążeniowy z rosnącym opóźnieniem (50→2000 ms), wywołania zewnętrzne (\texttt{external\_call=true}).
-  \item \texttt{combined-scenario.js} — trzy równoległe scenariusze: Fibonacci (30 VU), przetwarzanie obrazu (5 VU), zapytania IO (80 VU).
-\end{itemize}
-
-\section{Docker i konteneryzacja}
-
-\subsection{Docker}
-
-\textit{Docker} jest platformą do tworzenia, dystrybucji i uruchamiania kontenerów. W projekcie każdy mikroserwis jest konteneryzowany za pomocą \texttt{Dockerfile}:
-
-\begin{itemize}
-  \item Obraz bazowy: \texttt{python:3.12-slim} (minimalny rozmiar, ~150 MB).
-  \item Instalacja zależności przez \texttt{pip install -r requirements.txt}.
-  \item Uruchomienie przez \texttt{uvicorn} (serwer ASGI) z parametrami: \texttt{--host 0.0.0.0 --port 8000}.
-\end{itemize}
-
-Wszystkie trzy obrazy Docker (\texttt{cpu-service}, \texttt{io-service}, \texttt{echo-server}) są budowane lokalnie i importowane do \textit{containerd} k3s przez skrypt \texttt{deploy-k3s.sh} z użyciem \texttt{k3s ctr images import}.
-
-\subsection{Docker Compose}
-
-\textit{Docker Compose} jest wykorzystywany wyłącznie do lokalnego \textit{developmentu} — szybkie uruchomienie obu serwisów (\texttt{cpu-service} i \texttt{io-service}) bez pełnego klastra \textit{Kubernetes}. Plik \texttt{docker-compose.yaml} w katalogu głównym projektu definiuje serwisy z \textit{Traefik} jako \textit{reverse proxy}.
-
-\section{Traefik jako Ingress Controller}
-
-\textit{Traefik} jest nowoczesnym \textit{reverse proxy} i \textit{load balancerem} zaprojektowanym dla architektur mikrousługowych. W projekcie \textit{Traefik} pełni rolę:
-
-\begin{itemize}
-  \item \textbf{Ingress Controller} w lokalnym środowisku \textit{Docker Compose} — kieruje ruch do odpowiednich serwisów na podstawie nazwy hosta (\texttt{cpu.magisterka.osabosa.pl}, \texttt{io.magisterka.osabosa.pl}).
-  \item \textbf{Automatyczna konfiguracja} — \textit{Traefik} wykrywa kontenery za pomocą \textit{Docker provider} i automatycznie tworzy routing.
-\end{itemize}
-
-W środowisku \textit{Kubernetes} (k3s) \textit{Traefik} nie jest używany — komunikacja między k6 a serwisami odbywa się przez \texttt{kubectl port-forward}, co eliminuje potrzebę \textit{Ingress Controllera} w klastrze testowym.
-
-\section{GKE (Google Kubernetes Engine) — wdrożenie chmurowe}
-
-\subsection{Charakterystyka GKE}
-
-\textit{Google Kubernetes Engine} (GKE) jest zarządzaną usługą \textit{Kubernetes} oferowaną przez \textit{Google Cloud Platform} (GCP). GKE automatyzuje zarządzanie \textit{Control Plane}, aktualizacje, skalowanie węzłów i integrację z ekosystemem GCP.
-
-\subsection{Porównanie k3s vs GKE}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|X|}
-    \hline
-    \textbf{Aspekt} & \textbf{k3s (lokalnie)} & \textbf{GKE (chmura)} \\
-    \hline
-    Zarządzanie Control Plane & Ręczne (użytkownik) & Automatyczne (GCP) \\
-    Koszt & $0$ (własny sprzęt) & $\sim0.25$ USD/h (e2-standard-4 + management fee) \\
-    Skalowalność węzłów & 1 węzeł (QNAP) & Wiele węzłów (node pools) \\
-    Opóźnienie sieciowe & $<1$ ms (localhost) & $\sim1-5$ ms (intra-zone) \\
-    Łatwość utworzenia & \texttt{curl ... | sh} & \texttt{gcloud container clusters create} \\
-    \hline
-  \end{tabularx}
-  \caption{Porównanie środowiska lokalnego (\textit{k3s}) i chmurowego (\textit{GKE})}
-  \label{tab:k3s-gke-comparison}
-\end{table}
-
-GKE został wybrany jako środowisko chmurowe dla dodatkowej części badawczej (Faza VII) z następujących powodów:
-\begin{itemize}
-  \item $300$ USD kredytów startowych dla nowych kont GCP (90 dni).
-  \item Najprostsza konfiguracja spośród głównych dostawców chmury (\texttt{gcloud container clusters create}).
-  \item Pełna zgodność ze standardowym API \textit{Kubernetes} — manifesty nie wymagają modyfikacji.
-\end{itemize}
-
-\section{Podsumowanie stosu technologicznego}
-
-\begin{table}[H]
-  \centering
-  \begin{tabularx}{\textwidth}{|l|X|l|}
-    \hline
-    \textbf{Warstwa} & \textbf{Technologia} & \textbf{Rola} \\
-    \hline
-    Język / Framework & Python 3.12 + FastAPI & Implementacja mikroserwisów \\
-    Serwer ASGI & Uvicorn & Serwer HTTP dla FastAPI \\
-    Konteneryzacja & Docker + Docker Compose & Budowa obrazów, lokalny development \\
-    Orkiestracja (lokalnie) & k3s v1.28+ & Klaster \textit{Kubernetes} na QNAP \\
-    Orkiestracja (chmura) & GKE & Zarządzany \textit{Kubernetes} w GCP \\
-    Monitoring & Prometheus + Grafana & Zbieranie i wizualizacja metryk \\
-    Custom Metrics & prometheus-adapter v0.12.0 & Mostek Prometheus → HPA \\
-    Testy obciążeniowe & k6 v0.48+ & Generowanie ruchu, pomiar metryk \\
-    Reverse proxy (dev) & Traefik & Routing w Docker Compose \\
-    \hline
-  \end{tabularx}
-  \caption{Podsumowanie stosu technologicznego projektu}
-  \label{tab:tech-stack}
-\end{table}
+\section{Narzędzie testów obciążeniowych Grafana k6}
+\label{sec:k6_charakterystyka}
+Do generowania deterministycznego obciążenia sieciowego wykorzystano otwartoźródłowe narzędzie \textit{Grafana k6} w wersji \texttt{v0.48+}. Narzędzie to zostało napisane w języku \textit{Go}, natomiast scenariusze testowe definiowane są w języku \textit{JavaScript (ES6)}. Przewagą systemu \textit{k6} nad klasycznymi rozwiązaniami (np. Apache JMeter) jest wysoka wydajność jednowątkowa oraz natywne wsparcie dla asynchronicznych modeli wykonywania operacji wejścia-wyjścia, co pozwala na generowanie tysięcy współbieżnych użytkowników (\textit{Virtual Users -- VU}) bez wywoływania zjawiska saturacji zasobów maszyny pomiarowej.
