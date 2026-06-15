@@ -1,0 +1,80 @@
+% Baseline results table
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|X|}
+    \hline
+    \textbf{Metryka} & \texttt{baseline-cpu} & \texttt{baseline-io} \\
+    \hline
+    Średni RPS & 66.8 & 62.4 \\
+    p50 & 85.3\,ms & 999\,ms \\
+    p95 & 2.70\,s & 2.93\,s \\
+    p99 & 567\,ms & 1.83\,s \\
+    Stopa błędów (\%) & 37.70\% & 0.17\% \\
+    Średnie zużycie CPU (mCPU) & 145 & 58 \\
+    Średnie zużycie pamięci (MiB) & N/A & N/A \\
+    \hline
+  \end{tabularx}
+  \caption{Wyniki scenariuszy bazowych (średnia z 5 powtórzeń)}
+  \label{tab:baseline-results}
+\end{table}
+
+% CPU-bound HPA comparison table
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|X|X|}
+    \hline
+    \textbf{Metryka} & \texttt{cpu-cpu} & \texttt{cpu-memory} & \texttt{cpu-custom} \\
+    \hline
+    Średni RPS & 84.3 & 67.5 & 65.4 \\
+    p50 & 126\,ms & 86.3\,ms & 84.2\,ms \\
+    p95 & 459\,ms & 2.39\,s & 2.69\,s \\
+    p99 & 349\,ms & 373\,ms & 698\,ms \\
+    Stopa błędów (\%) & 0.04\% & 38.04\% & 37.97\% \\
+    Amplituda skalowania ($A_R$) & 29 & 0 & 1 \\
+    Maks. liczba replik & 29 & 1 & 1 \\
+    Średnie zużycie CPU (mCPU) & 80 & 262 & 175 \\
+    \hline
+  \end{tabularx}
+  \caption{Wyniki scenariuszy CPU-bound (HPA CPU 50\%, Memory 70\%, Custom RPS 100/Pod)}
+  \label{tab:cpu-results}
+\end{table}
+
+% I/O-bound HPA comparison table
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|X|X|}
+    \hline
+    \textbf{Metryka} & \texttt{io-cpu} & \texttt{io-memory} & \texttt{io-custom} \\
+    \hline
+    Średni RPS & 99.4 & 62.4 & 62.4 \\
+    p50 & 609\,ms & 998\,ms & 1.00\,s \\
+    p95 & 700\,ms & 2.97\,s & 3.01\,s \\
+    p99 & 671\,ms & 1.83\,s & 1.80\,s \\
+    Stopa błędów (\%) & 0.11\% & 0.17\% & 0.17\% \\
+    Amplituda skalowania ($A_R$) & 6 & 0 & 0 \\
+    Maks. liczba replik & 7 & 1 & 1 \\
+    Średnie zużycie CPU (mCPU) & 20 & 54 & 61 \\
+    \hline
+  \end{tabularx}
+  \caption{Wyniki scenariuszy I/O-bound (HPA CPU 50\%, Memory 70\%, Custom RPS 100/Pod)}
+  \label{tab:io-results}
+\end{table}
+
+% Scaling efficiency table
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|X|X|}
+    \hline
+    \textbf{Scenariusz} & \textbf{Efektywność $E$} & \textbf{Amplituda $A_R$} & \textbf{Maks. replik} \\
+    \hline
+    \texttt{cpu-cpu} & 0.01 & 29 & 29 \\
+    \texttt{io-cpu} & 0.10 & 6 & 7 \\
+    \texttt{cpu-memory} & — (brak skalowania) & 0 & 1 \\
+    \texttt{io-memory} & — (brak skalowania) & 0 & 1 \\
+    \texttt{cpu-custom} & — (brak skalowania) & 1 & 1 \\
+    \texttt{io-custom} & — (brak skalowania) & 0 & 1 \\
+    \hline
+  \end{tabularx}
+  \caption{Efektywność skalowania — porównanie strategii}
+  \label{tab:efficiency}
+\end{table}

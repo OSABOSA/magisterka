@@ -1,0 +1,143 @@
+% =============================================================================
+% Rozdział 3: Projekt architektury systemu badawczego
+% =============================================================================
+\chapter{Projekt architektury systemu badawczego}
+
+Rozdział niniejszy opisuje projekt systemu badawczego --- jego komponenty, strategie skalowania oraz plan eksperymentów. Wszystkie decyzje projektowe podporządkowano celowi badawczemu: porównaniu skuteczności trzech strategii HorizontalPodAutoscaler dla dwóch diametralnie różnych profili obciążeniowych, w kontrolowanym środowisku GKE.
+
+\section{Macierz badawcza}
+
+Podstawą metodologii badawczej jest macierz $2 \times 3$ obejmująca dwie aplikacje o odmiennych profilach obciążeniowych i trzy strategie HPA:
+
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|X|X|}
+    \hline
+    \textbf{Profil aplikacji} & \textbf{HPA CPU (50\%)} & \textbf{HPA Memory (70\%)} & \textbf{HPA Custom RPS (100/Pod)} \\
+    \hline
+    CPU-bound (cpu-service) & \texttt{cpu-cpu} & \texttt{cpu-memory} & \texttt{cpu-custom} \\
+    \hline
+    I/O-bound (io-service) & \texttt{io-cpu} & \texttt{io-memory} & \texttt{io-custom} \\
+    \hline
+  \end{tabularx}
+  \caption{Macierz badawcza $2 \times 3$ --- identyfikatory scenariuszy testowych}
+  \label{tab:research-matrix}
+\end{table}
+
+Każda z sześciu kombinacji jest testowana w odrębnym scenariuszu. Macierz umożliwia izolowanie wpływu pojedynczej zmiennej niezależnej (strategia HPA) przy kontrolowanym profilu obciążeniowym. Oprócz scenariuszy macierzy zdefiniowano dwa scenariusze bazowe (\texttt{baseline-cpu} i \texttt{baseline-io}), w których serwisy działają ze stałą liczbą replik (1) bez HPA --- służą one jako punkt odniesienia do oceny, czy autoskalowanie w ogóle poprawia wydajność w stosunku do konfiguracji statycznej.
+
+\section{Aplikacje badawcze}
+
+System składa się z trzech mikroserwisów --- dwóch podlegających badaniu (cpu-service, io-service) oraz jednego pomocniczego (echo-server). Każdy mikroserwis jest niezależną aplikacją FastAPI (Python 3.12), konteneryzowaną za pomocą Docker i wdrażaną jako Deployment w Kubernetes. Wspólnymi cechami wszystkich serwisów są: automatyczna instrumentacja Prometheus przez bibliotekę \texttt{prometheus-fastapi-instrumentator}, endpoint health check \texttt{GET /health} wykorzystywany przez sondy Kubernetes oraz middleware CORS dla wygody testowania.
+
+\subsection{CPU-service --- obciążenie CPU-bound}
+
+CPU-service implementuje dwa endpointy obciążające procesor. \texttt{POST /process} przyjmuje plik graficzny, wykonuje sekwencję operacji CPU-intensywnych z użyciem biblioteki Pillow (konwersja do skali szarości, filtry BLUR, SHARPEN, FIND\_EDGES, ekstrakcja kanałów RGB, resize), oblicza entropię Shannona dla każdego kanału i zwraca statystyki przetwarzania. \texttt{GET /fibonacci} oblicza $n$-tą liczbę Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^{n})$; parametr $n$ jest konfigurowalny (domyślnie 25). Obie operacje są czysto CPU-intensywne --- nie wykonują operacji sieciowych ani dyskowych poza odbiorem żądania i wysłaniem odpowiedzi. Dzięki temu zużycie CPU silnie koreluje z liczbą żądań.
+
+\subsection{IO-service --- obciążenie I/O-bound}
+
+IO-service symuluje operacje wejścia-wyjścia przez dwa endpointy. \texttt{GET /query} wykonuje łańcuch asynchronicznych opóźnień: sekwencję wywołań \texttt{asyncio.sleep()} z konfigurowalnym opóźnieniem bazowym (domyślnie 100\,ms), liczbą kroków (domyślnie 3) oraz losowym rozrzutem ($\pm20\%$). Procesor pozostaje bezczynny podczas oczekiwania --- zużycie CPU nie koreluje z liczbą żądań, co czyni serwis czysto I/O-bound. \texttt{GET /upstream} przekazuje żądanie do echo-server i zwraca odpowiedź z dodatkowym opóźnieniem. Serwis wykorzystuje \texttt{asyncio.Semaphore(50)} do ograniczenia liczby współbieżnych zapytań.
+
+\subsection{Echo-server --- serwis pomocniczy}
+
+Echo-server jest minimalistycznym serwisem pełniącym rolę zależności zewnętrznej dla io-service. Udostępnia endpoint \texttt{POST /echo}, który zwraca kopię otrzymanego żądania, umożliwiając weryfikację poprawnego przekazywania danych w scenariuszu wywołań zewnętrznych. Echo-server jest wyłączony z macierzy badawczej.
+
+\subsection{Memory-service --- serwis pamięciowy}
+
+W ramach rozwoju projektu zaimplementowano również memory-service --- serwis z pamięciową bazą klucz-wartość symulujący obciążenie typu memory-bound. Nie został on włączony do głównej macierzy badawczej; stanowi rozszerzenie do potencjalnych przyszłych badań (patrz Rozdział~6).
+
+\section{Strategie HPA}
+
+Dla każdej aplikacji badawczej zdefiniowano trzy warianty HorizontalPodAutoscaler, różniące się wyłącznie typem metryki. Wszystkie HPA współdzielą parametry: \texttt{minReplicas=2}, \texttt{maxReplicas=10}, API \texttt{autoscaling/v2}.
+
+\textbf{HPA CPU} monitoruje średnie zużycie procesora jako procent resource request. Próg: 50\%. Jest to strategia najczęściej stosowana w ekosystemie Kubernetes --- jej skuteczność zależy od tego, czy zużycie CPU koreluje z obciążeniem aplikacji.
+
+\textbf{HPA Memory} monitoruje średnie zużycie pamięci jako procent resource request. Próg: 70\%. Strategia ta jest rzadziej stosowana, ponieważ większość aplikacji alokuje pamięć statycznie przy uruchomieniu --- metryka pamięci nie odzwierciedla wówczas bieżącego obciążenia. Hipoteza badawcza przewiduje, że HPA Memory będzie nieskuteczne dla obu profili obciążeniowych.
+
+\textbf{HPA Custom RPS} wykorzystuje niestandardową metrykę \texttt{http\_requests\_per\_second} --- liczbę żądań HTTP na sekundę na Pod, dostarczaną przez prometheus-adapter. Próg: 100 żądań na sekundę na Pod. Metryka RPS jest bezpośrednio powiązana z obciążeniem żądaniami niezależnie od tego, czy żądania są CPU-intensywne czy I/O-intensywne, co czyni tę strategię potencjalnie uniwersalną.
+
+\begin{lstlisting}[language=yaml, caption={Przykładowa konfiguracja HPA Custom RPS}, label={lst:hpa-custom-config}]
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: cpu-service-custom
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: cpu-service
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: http_requests_per_second
+        target:
+          type: AverageValue
+          averageValue: "100"
+\end{lstlisting}
+
+\section{Topologia wdrożeniowa}
+
+Wszystkie komponenty systemu badawczego działają w środowisku Google Cloud Platform, w pojedynczej sieci VPC obejmującej klaster GKE i maszynę Compute Engine (k6-generator). W klastrze, w namespace \texttt{magisterka}, znajdują się: trzy Deploymenty aplikacyjne (cpu-service, io-service, echo-server), trzy Serwisy typu LoadBalancer kierujące ruch na port 80 do targetPort 8000 odpowiedniego Deploymentu oraz sześć HPA (po trzy na serwis badawczy). Warstwę monitorującą tworzą kube-prometheus-stack (Prometheus + Grafana + kube-state-metrics + node-exporter) oraz prometheus-adapter.
+
+Ruch z k6 do serwisów jest kierowany przez GCP LoadBalancer na podstawie adresów IP mapowanych w opcjach \texttt{hosts} skryptów testowych. Opóźnienie sieciowe między generatorem obciążenia a Podami wynosi $\sim$1--5\,ms (komunikacja wewnątrz tej samej strefy VPC). Tabela~\ref{tab:resource-allocation} przedstawia przydział zasobów dla poszczególnych serwisów --- różnice odzwierciedlają odmienne profile obciążeniowe.
+
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|X|X|}
+    \hline
+    \textbf{Serwis} & \textbf{CPU request} & \textbf{CPU limit} & \textbf{Memory request / limit} \\
+    \hline
+    cpu-service & 250\,m & 1000\,m & 256\,Mi / 512\,Mi \\
+    io-service & 100\,m & 500\,m & 128\,Mi / 256\,Mi \\
+    echo-server & 50\,m & 200\,m & 64\,Mi / 128\,Mi \\
+    memory-service & 200\,m & 500\,m & 256\,Mi / 1024\,Mi \\
+    \hline
+  \end{tabularx}
+  \caption{Zasoby przydzielone serwisom}
+  \label{tab:resource-allocation}
+\end{table}
+
+\section{Infrastruktura monitorująca i eksport danych}
+
+Stos monitorujący oparty na kube-prometheus-stack (Helm) dostarcza Prometheusa (scrape co 15\,s) oraz Grafanę z autorskim dashboardem ,,Magisterka -- System Overview''. Dashboard jest eksponowany publicznie przez GCP LoadBalancer. Aplikacje badawcze są automatycznie wykrywane przez ServiceMonitor dzięki adnotacjom \texttt{prometheus.io/scrape: "true"} na Podach.
+
+Dla każdego z 8 scenariuszy testowych eksportowanych jest 5 zestawów danych CSV z Grafany: liczba replik HPA w czasie, zużycie CPU per Pod (mCPU), zużycie pamięci per Pod (MiB), przepustowość RPS w czasie oraz percentyle opóźnień (p50, p95, p99). Dane te, wraz z wynikami k6 (JSON + podsumowanie tekstowe), stanowią kompletny zbiór dla każdego scenariusza.
+
+Prometheus Adapter implementuje Custom Metrics API, umożliwiając HPA odczytywanie metryk aplikacyjnych. Konfiguracja definiuje cztery reguły mapowania: po dwie dla cpu-service i io-service --- każda para obejmuje metrykę RPS (przez \texttt{rate()\lbrack{}1m\rbrack{}} z liczników żądań) oraz metrykę liczby żądań w toku.
+
+\section{Plan eksperymentów}
+
+\subsection{Scenariusze testowe}
+
+Eksperyment obejmuje 8 scenariuszy uruchamianych sekwencyjnie: dwa bazowe (baseline-cpu, baseline-io) oraz sześć z macierzy badawczej (cpu-cpu, cpu-memory, cpu-custom, io-cpu, io-memory, io-custom).
+
+\subsection{Procedura}
+
+Każdy scenariusz jest wykonywany według ściśle określonej procedury, w całości zautomatyzowanej przez skrypt \texttt{run-tests.sh} działający na maszynie k6-generator. Procedura obejmuje: przełączenie HPA na odpowiednią strategię (usunięcie wszystkich istniejących HPA dla docelowego serwisu i nałożenie pliku HPA odpowiadającego testowanej strategii), reset Deploymentu do 1 repliki z oczekiwaniem na gotowość, uruchomienie testu k6 z ruchem kierowanym na adres IP GCP LoadBalancer, zapis wyników do katalogu \texttt{results/<scenario>/}. Scenariusz jest powtarzany 3--5-krotnie. Po każdym scenariuszu następuje cooldown: skalowanie obu serwisów do 1 repliki, usunięcie wszystkich HPA, odczekanie 120 sekund na stabilizację klastra.
+
+\subsection{Profile obciążeniowe k6}
+
+Dla CPU-bound wykorzystywany jest skrypt \texttt{cpu-load-test.js} z dwoma scenariuszami: Fibonacci (ramp-up 1$\rightarrow$50 VU przez 60\,s, steady 120\,s) oraz przetwarzanie obrazu (stałe 10 VU przez 180\,s). Dla I/O-bound --- skrypt \texttt{io-load-test.js} z trzema scenariuszami: stałe zapytania (ramp-up 1$\rightarrow$100 VU przez 120\,s, steady 180\,s), stres-test (stałe 30 VU, delay rosnący od 50 do 2000\,ms) oraz wywołania zewnętrzne (20 VU, \texttt{external\_call=true}). Skrypt \texttt{combined-scenario.js} uruchamia trzy scenariusze równolegle: Fibonacci (30 VU), przetwarzanie obrazu (5 VU) i zapytania IO (80 VU).
+
+\subsection{Metryki badawcze}
+
+Dla każdego scenariusza zbierane są: opóźnienia odpowiedzi (percentyle p50, p95, p99 w ms), przepustowość (RPS), czas do skalowania (od przekroczenia progu HPA do osiągnięcia docelowej liczby replik), efektywność skalowania (stosunek względnej zmiany przepustowości do względnej zmiany liczby replik), stopa błędów (odsetek żądań z kodem HTTP $\geq 400$), liczba replik w czasie oraz zużycie CPU i pamięci na Pod.
+
+\subsection{Analiza zjawisk przejściowych}
+
+Szczególna uwaga w trakcie eksperymentów zostanie poświęcona trzem zjawiskom przejściowym, które mają istotny wpływ na zachowanie systemów w środowisku chmurowym.
+
+\textbf{HPA Lag} --- opóźnienie $\sim$60--90 sekund między przekroczeniem progu metryki a faktycznym utworzeniem i osiągnięciem gotowości przez nowe Pody. Wynika ono z sumy: czasu scrapowania metryk przez Prometheusa (15\,s), czasu odświeżenia HPA (15\,s), czasu tworzenia Podów (2--5\,s) oraz Cold Start Latency.
+
+\textbf{Cold Start Latency} --- czas potrzebny nowo utworzonemu Podowi na osiągnięcie gotowości do obsługi ruchu, obejmujący pobranie obrazu z rejestru kontenerów, uruchomienie kontenera, inicjalizację aplikacji i zaliczenie readiness probe. Łącznie 15--30 sekund, w trakcie których LoadBalancer może kierować ruch do niedojrzałego Poda, powodując błędy HTTP 502/503.
+
+\textbf{CPU Throttling Cascade} --- zjawisko kaskadowej degradacji wydajności, gdy Pody osiągają limit CPU podczas gwałtownego wzrostu ruchu. Mechanizm CFS bandwidth control w jądrze Linux ogranicza czas procesora, co powoduje kolejkowanie żądań, wzrost opóźnień, timeouty w k6 i dalsze blokowanie wątków roboczych Uvicorn. Degradacja trwa do momentu osiągnięcia gotowości przez nowe Pody utworzone przez HPA.
+
+Wszystkie trzy zjawiska są identyfikowane i mierzone na podstawie korelacji między danymi z eksportów CSV z Grafany: HPA Lag jako przesunięcie czasowe między krzywą RPS a krzywą liczby replik, Cold Start Latency jako czas od pojawienia się nowej repliki do spadku opóźnień P99, a CPU Throttling Cascade przez jednoczesne wystąpienie wysokiego zużycia CPU, gwałtownego wzrostu opóźnień i wzrostu stopy błędów.
+
+\section{Podsumowanie decyzji projektowych}
+
+Zaprojektowany system badawczy realizuje pięć celów architektonicznych. \textbf{Izolacja zmiennych}: każdy scenariusz testuje dokładnie jedną kombinację profil--strategia, przy wyizolowanym generatorze obciążenia i ustabilizowanym klastrze. \textbf{Powtarzalność}: każdy scenariusz jest uruchamiany wielokrotnie, co umożliwia analizę statystyczną. \textbf{Automatyzacja}: cały proces --- przełączanie HPA, reset Deploymentów, uruchamianie k6, eksport CSV z Grafany --- jest zautomatyzowany przez skrypt \texttt{run-tests.sh}. \textbf{Odtwarzalność}: wszystkie manifesty, skrypty k6 i konfiguracje są przechowywane w repozytorium. \textbf{Realizm wdrożeniowy}: wykorzystanie GCP LoadBalancer zamiast port-forward oraz dedykowanej maszyny Compute Engine dla k6 odzwierciedla rzeczywiste warunki produkcyjne.

@@ -43,6 +43,10 @@ const PNG_BYTES = encoding.b64decode(MINIMAL_PNG_B64);
 // ---------------------------------------------------------------------------
 
 export const options = {
+  hosts: {
+    'cpu.magisterka.local': '8.233.83.130',
+    'io.magisterka.local': '8.233.83.130',
+  },
   scenarios: {
     cpu_fibonacci: {
       executor: 'ramping-vus',

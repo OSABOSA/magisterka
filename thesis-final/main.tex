@@ -1,0 +1,120 @@
+\documentclass[printmode,mgr,pl]{mgr}
+
+% =============================================================================
+% Pakiety
+% =============================================================================
+\usepackage{ifxetex}
+\ifxetex
+  \usepackage{fontspec}
+  \setmainfont{Latin Modern Roman}
+  \setsansfont{Latin Modern Sans}
+  \setmonofont{Latin Modern Mono}
+\else
+  \usepackage[utf8]{inputenc}
+  \usepackage[T1]{fontenc}
+\fi
+\usepackage[polish]{babel}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\usepackage{float}
+\usepackage{longtable}
+
+\pgfplotsset{compat=1.18}
+
+% =============================================================================
+% Konfiguracja listingów
+% =============================================================================
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny,
+  tabsize=2,
+  captionpos=b,
+  showstringspaces=false,
+  aboveskip=5pt,
+  belowskip=5pt,
+  extendedchars=true,
+  inputencoding=utf8,
+}
+
+\lstdefinelanguage{yaml}{
+  sensitive=false,
+  morecomment=[l]{\#},
+  morestring=[b]{"},
+  morestring=[b]{'},
+  moredelim=**[is][\color{teal}]{@}{@},
+}
+
+\lstdefinelanguage{javascript}{
+  morekeywords={break,case,catch,const,continue,default,delete,do,else,export,false,finally,for,function,if,import,in,let,new,null,return,switch,this,true,try,typeof,var,while},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]{'},
+  morestring=[b]{"},
+  morestring=[b]{`},
+}
+
+\lstdefinelanguage{Dockerfile}{
+  morekeywords={FROM,MAINTAINER,RUN,CMD,LABEL,EXPOSE,ENV,ADD,COPY,ENTRYPOINT,VOLUME,USER,WORKDIR,ARG,ONBUILD,STOPSIGNAL,HEALTHCHECK,SHELL},
+  sensitive=false,
+  morecomment=[l]{\#},
+  morestring=[b]{"},
+  morestring=[b]{'},
+}
+
+% =============================================================================
+% Metadane
+% =============================================================================
+\title{Projekt i analiza porównawcza wydajności skalowalnych architektur systemów typu SaaS}
+\engtitle{Design and comparative performance analysis of scalable architectures for SaaS systems}
+\author{Oskar Siemieniuk}
+\supervisor{dr inż. Konrad Kluwak}
+\field{Informatyka}
+\specialisation{Inżynieria Systemów Informatycznych}
+\keywords{skalowalność, Kubernetes, HPA, mikroserwisy, SaaS, testy obciążeniowe, Prometheus, autoskalowanie}
+
+% =============================================================================
+% Dokument
+% =============================================================================
+\begin{document}
+
+\bibliographystyle{plabbrv}
+
+\maketitle
+
+\tableofcontents
+
+% =============================================================================
+% Rozdziały główne
+% =============================================================================
+\mainmatter
+
+\include{rozdzial1}
+\include{rozdzial2}
+\include{rozdzial3}
+\include{rozdzial4}
+\include{rozdzial5}
+\include{rozdzial6}
+
+% =============================================================================
+% Bibliografia
+% =============================================================================
+\bibliography{bibliografia}
+
+\listoffigures
+\listoftables
+
+\end{document}

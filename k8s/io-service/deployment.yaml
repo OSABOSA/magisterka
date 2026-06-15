@@ -17,12 +17,12 @@ spec:
         app: io-service
         tier: backend
     spec:
-      # --- POPRAWKA 1: Wymuszenie instalacji na apps-pool ---
+      # --- Force scheduling on apps node pool ---
       nodeSelector:
         workload: apps
       containers:
         - name: io-service
-          # --- POPRAWKA 2: Ścieżka do Artifact Registry w GCP (Zmień TWÓJ_ID_PROJEKTU) ---
+          # --- GCP Artifact Registry image path (update PROJECT_ID) ---
           image: europe-west3-docker.pkg.dev/magisterka-497513/magisterka-repo/io-service:latest
           imagePullPolicy: Always
           ports:

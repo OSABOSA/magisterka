@@ -1,22 +1,22 @@
 #!/usr/bin/env bash
 # =============================================================================
-# run-tests.sh — Faza V: Badania eksperymentalne (macierz 2×3 k6 load tests)
+# run-tests.sh — Research experiments (2x3 matrix k6 load tests)
 #
-# Uruchom na QNAP-ie (gdzie jest kubectl i k6):
+# Run on test machine (with kubectl and k6):
 #   chmod +x scripts/run-tests.sh
 #   ./scripts/run-tests.sh
 #
-# Działanie:
-#   1. Sprawdza wymagania (kubectl, k6)
-#   2. Uruchamia port-forward dla każdego serwisu
-#   3. Dla każdego scenariusza: przełącza HPA → resetuje deployment → odpala k6
-#   4. Zapisuje wyniki do results/<scenario>/
-#   5. Sprząta port-forward
-#   6. Wyświetla podsumowanie
+# Operation:
+#   1. Check prerequisites (kubectl, k6)
+#   2. Start port-forward for each service
+#   3. For each scenario: switch HPA → reset deployment → run k6
+#   4. Save results to results/<scenario>/
+#   5. Clean up port-forward
+#   6. Display summary
 #
-# Scenariusze (macierz 2×3):
-#   baseline-cpu     – CPU-bound, brak HPA, 1 replika
-#   baseline-io      – I/O-bound, brak HPA, 1 replika
+# Scenarios (2x3 matrix):
+#   baseline-cpu     – CPU-bound, no HPA, 1 replica
+#   baseline-io      – I/O-bound, no HPA, 1 replica
 #   cpu-cpu          – CPU-bound + HPA CPU
 #   cpu-memory       – CPU-bound + HPA Memory
 #   cpu-custom       – CPU-bound + HPA Custom (RPS)
@@ -24,10 +24,10 @@
 #   io-memory        – I/O-bound + HPA Memory
 #   io-custom        – I/O-bound + HPA Custom (RPS)
 #
-# Użycie:
-#   ./scripts/run-tests.sh                    # wszystkie 8 scenariuszy
-#   ./scripts/run-tests.sh cpu-cpu            # pojedynczy scenariusz
-#   ./scripts/run-tests.sh quick              # szybki smoke test
+# Usage:
+#   ./scripts/run-tests.sh                    # all 8 scenarios
+#   ./scripts/run-tests.sh cpu-cpu            # single scenario
+#   ./scripts/run-tests.sh quick              # quick smoke test
 #   ./scripts/run-tests.sh stop               # zatrzymaj port-forwardy
 # =============================================================================
 
@@ -134,18 +134,18 @@ stop_port_forwards() {
     ok "Port-forward zatrzymany"
 }
 
-# ---- Przełączanie HPA -------------------------------------------------------
+# ---- HPA Switching -----------------------------------------------------------
 # switch_hpa <service> <strategy>
 #   service:  cpu-service | io-service
 #   strategy: cpu | memory | custom | none
 #
-# Usuwa wszystkie istniejące HPA dla danego serwisu,
-# następnie nakłada odpowiedni plik (chyba że strategy=none).
+# Removes all existing HPAs for the given service,
+# then applies the appropriate file (unless strategy=none).
 switch_hpa() {
     local service="$1"
     local strategy="$2"
 
-    info "Przełączanie HPA dla ${service} → strategia: ${strategy}"
+    info "Switching HPA for ${service} → strategy: ${strategy}"
 
     # Usuń wszystkie istniejące HPA dla tego serwisu
     local hpa_names
@@ -154,28 +154,28 @@ switch_hpa() {
         for hpa in ${hpa_names}; do
             ${KUBECTL} -n "${NAMESPACE}" delete "${hpa}" --ignore-not-found=true
         done
-        ok "  Usunięto poprzednie HPA dla ${service}"
+        ok "  Removed previous HPAs dla ${service}"
     fi
 
     # Nakładanie wybranej strategii
     case "${strategy}" in
         cpu)
             ${KUBECTL} apply -f "${K8S_DIR}/${service}/hpa-cpu.yaml"
-            ok "  Nałożono HPA CPU"
+            ok "  Applied HPA CPU"
             ;;
         memory)
             ${KUBECTL} apply -f "${K8S_DIR}/${service}/hpa-memory.yaml"
-            ok "  Nałożono HPA Memory"
+            ok "  Applied HPA Memory"
             ;;
         custom)
             ${KUBECTL} apply -f "${K8S_DIR}/${service}/hpa-custom.yaml"
-            ok "  Nałożono HPA Custom (RPS)"
+            ok "  Applied HPA Custom (RPS)"
             ;;
         none)
-            ok "  Brak HPA (baseline)"
+            ok "  No HPA (baseline)"
             ;;
         *)
-            err "  Nieznana strategia: ${strategy}"
+            err "  Unknown strategy: ${strategy}"
             return 1
             ;;
     esac
@@ -201,21 +201,21 @@ reset_deployment() {
 
 # ---- Cooldown między scenariuszami (D7) -------------------------------------
 cooldown() {
-    info "===== COOLDOWN: Stabilizacja klastra (120s) ====="
+    info "===== COOLDOWN: Cluster stabilization (120s) ====="
 
     # 1. Skaluj oba serwisy do 1 repliki
-    info "Skalowanie cpu-service i io-service → 1 replika..."
+    info "Scaling cpu-service and io-service → 1 replica..."
     ${KUBECTL} -n "${NAMESPACE}" scale deployment cpu-service io-service --replicas=1 2>/dev/null || true
 
     # 2. Usuń wszystkie aktywne HPA
-    info "Usuwanie wszystkich HPA w namespace ${NAMESPACE}..."
+    info "Removing all HPAs in namespace ${NAMESPACE}..."
     ${KUBECTL} -n "${NAMESPACE}" delete hpa --all --ignore-not-found=true 2>/dev/null || true
 
     # 3. Czekaj 120s na stabilizację
-    info "Oczekiwanie 120s na stabilizację klastra..."
+    info "Waiting 120s for cluster stabilization..."
     sleep 120
 
-    ok "Cooldown zakończony — klaster ustabilizowany"
+    ok "Cooldown complete — cluster stabilized"
     echo ""
 }
 

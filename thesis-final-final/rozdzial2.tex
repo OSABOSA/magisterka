@@ -1,0 +1,118 @@
+% =============================================================================
+% Rozdział 2: Przegląd technologii
+% =============================================================================
+\chapter{Przegląd technologii}
+
+W rozdziale tym omówiono technologie wykorzystane w projekcie badawczym, które nie zostały szczegółowo opisane w części teoretycznej (Rozdział~1). Nacisk położono na komponenty specyficzne dla środowiska Google Cloud Platform (GCP): zarządzany klaster GKE, równoważenie obciążenia przez GCP LoadBalancer, maszynę Compute Engine jako generator obciążenia testowego oraz stos monitorujący kube-prometheus-stack z prometheus-adapter jako mostkiem między metrykami aplikacyjnymi a API HPA.
+
+\section{Google Kubernetes Engine --- zarządzany Kubernetes w GCP}
+
+Google Kubernetes Engine (GKE) jest zarządzaną usługą Kubernetes oferowaną przez Google Cloud Platform, certyfikowaną przez CNCF pod kątem pełnej zgodności API. W odróżnieniu od samodzielnie administrowanego klastra, GKE automatycznie zarządza warstwą Control Plane --- użytkownik nie ma bezpośredniego dostępu do komponentów takich jak etcd czy kube-apiserver, co eliminuje konieczność ich ręcznej konfiguracji i utrzymania.
+
+W projekcie wykorzystano klaster GKE w konfiguracji VPC-native na maszynach typu \texttt{e2-standard-4} (4 vCPU, 16\,GB RAM). Wybór GKE jako platformy badawczej podyktowany był czterema czynnikami. Po pierwsze, pełna zgodność API gwarantuje, że wszystkie manifesty (Deployment, HPA, Service) działają identycznie jak na dowolnym klastrze zgodnym z CNCF. Po drugie, integracja z GCP LoadBalancer umożliwia bezpośrednią ekspozycję serwisów aplikacyjnych na zewnętrzne adresy IP bez potrzeby tunelowania. Po trzecie, maszyna generująca obciążenie testowe (Compute Engine) znajduje się w tej samej sieci VPC co klaster, co zapewnia niskie opóźnienie sieciowe ($\sim$1--5\,ms). Po czwarte, GKE cluster autoscaler automatycznie dostosowuje liczbę węzłów do zapotrzebowania, umożliwiając testy z dużą liczbą Podów bez ręcznej interwencji.
+
+\section{GCP LoadBalancer --- ekspozycja serwisów}
+
+W środowisku GKE serwisy typu \texttt{LoadBalancer} są automatycznie integrowane z infrastrukturą równoważenia obciążenia GCP. Po utworzeniu obiektu Service typu \texttt{LoadBalancer}, kontroler GKE (cloud controller manager) tworzy regułę forwarding rule w GCP, a platforma przydziela publiczny adres IP (regionalny, statyczny lub efemeryczny). Ruch przychodzący na ten adres jest dystrybuowany do Podów przez kube-proxy na węzłach.
+
+W projekcie wszystkie serwisy aplikacyjne są eksponowane przez LoadBalancer, co umożliwia maszynie generującej obciążenie testowe bezpośrednie wysyłanie żądań HTTP. Rozwiązanie to jest istotnie lepsze od powszechnie stosowanego w środowiskach deweloperskich mechanizmu \texttt{kubectl port-forward}, który tuneluje ruch przez pojedyncze połączenie WebSocket do API server --- przy dużym obciążeniu tworzy to wąskie gardło i dodaje nienaturalne opóźnienia. GCP LoadBalancer eliminuje te ograniczenia, zapewniając bezpośrednią ścieżkę sieciową między generatorem obciążenia a Podami, co odzwierciedla rzeczywiste warunki produkcyjne.
+
+\section{Compute Engine --- generator obciążenia}
+
+Google Compute Engine (GCE) to usługa maszyn wirtualnych GCP. W projekcie wykorzystano dedykowaną maszynę (nazwaną \texttt{k6-generator}) jako wyłącznego hosta dla narzędzia k6, generującego obciążenie testowe. Umieszczenie generatora na osobnej maszynie w tej samej sieci VPC co klaster GKE rozwiązuje dwa problemy: zapobiega zakłócaniu wyników testów przez konkurencję o zasoby (generator i badane serwisy nie dzielą CPU ani pamięci) oraz zapewnia realistyczne, niskie opóźnienia sieciowe między nadawcą a odbiorcą ruchu.
+
+Zamiast konfiguracji DNS (która wymagałaby rejestracji domen i propagacji rekordów), skrypty k6 wykorzystują mechanizm \texttt{options.hosts} do bezpośredniego mapowania nazw serwisów na adresy IP GCP LoadBalancer. Mechanizm ten działa na poziomie biblioteki HTTP k6 i podmienia nagłówek \texttt{Host} oraz docelowy adres IP dla każdego żądania.
+
+\begin{lstlisting}[language=javascript, caption={Mapowanie hostów w opcjach skryptu k6}, label={lst:k6-hosts-mapping}]
+export const options = {
+  hosts: {
+    'cpu-service': '34.118.71.122',
+    'io-service': '35.204.93.45',
+  },
+  scenarios: { ... }
+};
+\end{lstlisting}
+
+\section{kube-prometheus-stack --- stos monitorujący}
+
+kube-prometheus-stack jest pakietem Helm (Helm chart) rozwijanym przez społeczność prometheus-community, który instaluje kompletny stos monitorujący dla Kubernetes. W skład pakietu wchodzą: Prometheus (system zbierania i przechowywania metryk w postaci szeregów czasowych), Grafana (platforma wizualizacji danych), kube-state-metrics (komponent generujący metryki o stanie obiektów Kubernetes), node-exporter (komponent zbierający metryki systemowe z węzłów) oraz Prometheus Operator (kontroler zarządzający cyklem życia instancji Prometheusa).
+
+Wybór instalacji przez Helm --- zamiast ręcznego wdrażania pojedynczych manifestów YAML --- jest podyktowany automatyczną konfiguracją: ServiceMonitor i PodMonitor automatycznie wykrywają źródła metryk na podstawie etykiet, bez konieczności ręcznej edycji pliku \texttt{prometheus.yml}. Ponadto, Grafana otrzymuje zestaw gotowych dashboardów dla Kubernetes, a Prometheus Operator zarządza aktualizacjami i skalowaniem.
+
+Pakiet instaluje się jednym zestawem poleceń:
+
+\begin{lstlisting}[language=bash, caption={Instalacja kube-prometheus-stack przez Helm}, label={lst:helm-install}]
+helm repo add prometheus-community \
+  https://prometheus-community.github.io/helm-charts
+helm repo update
+helm install monitoring prometheus-community/kube-prometheus-stack \
+  --namespace magisterka --create-namespace \
+  --set prometheus.prometheusSpec.serviceMonitorSelectorNilUsesHelmValues=false \
+  --set grafana.service.type=LoadBalancer
+\end{lstlisting}
+
+Parametr \texttt{grafana.service.type=LoadBalancer} eksponuje Grafanę publicznie przez GCP LoadBalancer, umożliwiając obserwację eksperymentów w czasie rzeczywistym z dowolnej przeglądarki.
+
+\subsection{Prometheus}
+
+Prometheus jest otwartoźródłowym systemem monitorowania, pierwotnie opracowanym w SoundCloud, obecnie inkubowanym przez CNCF. Jego architektura opiera się na modelu pull: Prometheus aktywnie pobiera (scrape) metryki z aplikacji poprzez HTTP w konfigurowalnych interwałach --- w projekcie co 15 sekund. Zebrane dane są przechowywane w natywnej bazie szeregów czasowych (TSDB) z etykietami umożliwiającymi filtrowanie i agregację. Język zapytań PromQL pozwala na zaawansowane operacje: agregacje, operacje na zakresach czasowych oraz predykcję.
+
+W projekcie Prometheus pełni podwójną rolę. Zbiera metryki infrastrukturalne (CPU, RAM, liczba replik, stan HPA) poprzez kube-state-metrics i node-exporter oraz metryki aplikacyjne z mikroserwisów (RPS, czas przetwarzania, liczba aktywnych zapytań) z endpointów \texttt{/metrics}. Jednocześnie udostępnia te dane przez API dla prometheus-adapter, który transformuje zapytania PromQL na format zrozumiały dla HPA Kubernetes.
+
+\subsection{Grafana}
+
+Grafana jest platformą do wizualizacji danych, integrującą się z wieloma źródłami, w tym z Prometheusem. W projekcie wykorzystano autorski dashboard ,,Magisterka -- System Overview'' zawierający 16 paneli odświeżanych co 10 sekund, pokazujących kluczowe metryki: RPS, zużycie CPU i pamięci per Pod, percentyle opóźnień (p50, p95, p99), liczbę replik oraz stan HPA. Dashboard jest dostępny publicznie przez GCP LoadBalancer.
+
+Dla każdego scenariusza testowego z Grafany eksportowanych jest 5 zestawów danych CSV: liczba replik w czasie, zużycie CPU per Pod (mCPU), zużycie pamięci per Pod (MiB), przepustowość (RPS) oraz percentyle opóźnień (ms). Dane te, wraz z wynikami k6, stanowią kompletny zbiór danych badawczych dla analizy w Rozdziale~5.
+
+\subsection{Prometheus Adapter}
+
+Prometheus Adapter (wersja v0.12.0) jest komponentem implementującym Kubernetes Custom Metrics API. Jego rola polega na rejestracji jako APIService w Kubernetes (rozszerzając API o ścieżki \texttt{/apis/custom.metrics.k8s.io/}), pobieraniu metryk z Prometheusa poprzez zapytania PromQL oraz serwowaniu tych metryk w formacie oczekiwanym przez HPA.
+
+Konfiguracja adaptera jest przechowywana w ConfigMap (\texttt{prometheus-adapter-config}) i definiuje reguły mapowania metryk Prometheusa na metryki Kubernetes. W projekcie zdefiniowano cztery reguły: dwie dla metryki RPS (przeliczanej przez funkcję \texttt{rate()\lbrack{}1m\rbrack{}} z liczników żądań HTTP) oraz dwie dla metryki liczby żądań w toku (in-flight) --- po jednej parze dla cpu-service i io-service.
+
+\lstinputlisting[
+  language=yaml,
+  caption={Konfiguracja Prometheus Adapter --- reguły mapowania metryk},
+  label={lst:adapter-config},
+  firstline=1,
+  lastline=66
+]{../k8s/monitoring/prometheus-adapter-config.yaml}
+
+\section{k6 --- narzędzie do testów obciążeniowych}
+
+k6 (Grafana k6) jest otwartoźródłowym narzędziem do testów obciążeniowych, napisanym w Go z interfejsem skryptowym w JavaScript (ES6). Pojedyncza instancja k6 jest w stanie generować setki wirtualnych użytkowników (VU, Virtual Users) bez potrzeby architektury rozproszonej, co czyni ją odpowiednią do testów średniej skali bez dodatkowej infrastruktury.
+
+W projekcie zdefiniowano trzy skrypty k6 odpowiadające profilom obciążeniowym i scenariuszom badawczym. Skrypt \texttt{cpu-load-test.js} zawiera dwa scenariusze: Fibonacci (ramp-up od 1 do 50 VU przez 60 sekund, następnie stałe obciążenie 50 VU przez 120 sekund) oraz przetwarzanie obrazu (stałe 10 VU wysyłających losowo generowane obrazy PNG do endpointu \texttt{POST /process}). Skrypt \texttt{io-load-test.js} zawiera trzy scenariusze: zapytania ze stałym opóźnieniem (ramp-up 1$\rightarrow$100 VU), test obciążeniowy z rosnącym opóźnieniem (50$\rightarrow$2000\,ms) oraz wywołania zewnętrzne. Skrypt \texttt{combined-scenario.js} uruchamia trzy scenariusze równolegle: Fibonacci (30 VU), przetwarzanie obrazu (5 VU) oraz zapytania IO (80 VU).
+
+Każdy skrypt definiuje progi akceptacji (thresholds): percentyl p95 czasu odpowiedzi poniżej 5000\,ms dla scenariuszy CPU oraz poniżej 10000\,ms dla scenariuszy IO, a także dopuszczalną stopę błędów HTTP ($<1\%$ dla CPU, $<5\%$ dla IO). Przekroczenie tych progów oznacza niepowodzenie testu.
+
+\section{Docker i konteneryzacja}
+
+Każdy mikroserwis w projekcie jest konteneryzowany za pomocą Docker. Wszystkie Dockerfile opierają się na wspólnym wzorcu: obraz bazowy \texttt{python:3.12-slim} (minimalny rozmiar), instalacja zależności przez \texttt{pip install --no-cache-dir}, aplikacja jako pojedynczy plik \texttt{main.py}, uruchomienie przez Uvicorn z parametrami \texttt{--host 0.0.0.0 --port 8000}.
+
+Obrazy są budowane lokalnie i przesyłane do GCP Artifact Registry, skąd GKE pobiera je automatycznie podczas wdrażania na podstawie pola \texttt{image} w Deployment. W projekcie nie wykorzystuje się Docker Compose do orkiestracji testów --- wszystkie eksperymenty są przeprowadzane bezpośrednio na klastrze GKE, co zapewnia zgodność środowiska testowego z produkcyjnym. Plik \texttt{docker-compose.yaml} znajdujący się w repozytorium służy wyłącznie do opcjonalnego, szybkiego uruchomienia serwisów w środowisku deweloperskim.
+
+\section{Podsumowanie stosu technologicznego}
+
+\begin{table}[H]
+  \centering
+  \begin{tabularx}{\textwidth}{|l|X|l|}
+    \hline
+    \textbf{Warstwa} & \textbf{Technologia} & \textbf{Rola} \\
+    \hline
+    Język / Framework & Python 3.12 + FastAPI & Implementacja mikroserwisów \\
+    Serwer ASGI & Uvicorn & Serwer HTTP dla FastAPI \\
+    Konteneryzacja & Docker & Budowa obrazów \\
+    Rejestr obrazów & GCP Artifact Registry & Przechowywanie obrazów \\
+    Orkiestracja & GKE (Google Kubernetes Engine) & Zarządzany klaster Kubernetes w GCP \\
+    Sieć & GCP VPC + LoadBalancer & Łączność i ekspozycja serwisów \\
+    Monitoring & kube-prometheus-stack (Helm) & Prometheus + Grafana + kube-state-metrics \\
+    Custom Metrics & prometheus-adapter v0.12.0 & Mostek Prometheus $\rightarrow$ HPA \\
+    Testy obciążeniowe & k6 v0.48+ (na Compute Engine) & Generowanie ruchu, pomiar metryk \\
+    Generator obciążenia & GCP Compute Engine & Dedykowana VM dla k6 \\
+    \hline
+  \end{tabularx}
+  \caption{Podsumowanie stosu technologicznego projektu --- środowisko GCP/GKE}
+  \label{tab:tech-stack}
+\end{table}

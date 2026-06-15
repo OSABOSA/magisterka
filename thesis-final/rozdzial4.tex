@@ -1,0 +1,119 @@
+% =============================================================================
+% Rozdział 4: Implementacja
+% =============================================================================
+\chapter{Implementacja}
+
+Rozdział niniejszy dokumentuje implementację systemu badawczego. Wszystkie listingi odwołują się do rzeczywistych plików w repozytorium projektu.
+
+\section{Struktura repozytorium}
+
+Kod projektu zorganizowano w następującej strukturze:
+
+\begin{verbatim}
+magisterka/
+  apps/
+    cpu-service/         # CPU-bound microservice
+    io-service/          # I/O-bound microservice
+    echo-server/         # Auxiliary echo service
+    memory-service/      # Memory-bound microservice (extension)
+  k8s/
+    base/                # Namespace
+    cpu-service/         # Deployment + Service + HPA x3
+    io-service/          # Deployment + Service + HPA x3
+    echo-service/        # Deployment + Service
+    memory-service/      # Deployment + Service + HPA
+    monitoring/          # Prometheus Adapter config
+  monitoring/
+    dashboards/          # Grafana dashboard JSON
+  scripts/
+    run-tests.sh         # Test orchestration (8 scenarios)
+  tests/
+    k6/                  # k6 load test scripts
+  docs/
+    prd.md               # Product Requirements Document
+  docker-compose.yaml    # Optional local development (not used in research)
+\end{verbatim}
+
+\section{Implementacja mikroserwisów}
+
+Każdy mikroserwis jest niezależną aplikacją FastAPI w wersji Python 3.12~\cite{fastapi}, konteneryzowaną przez Docker i uruchamianą przez Uvicorn. Wszystkie serwisy współdzielą wspólny wzorzec implementacyjny: obraz bazowy \texttt{python:3.12-slim}, instalację zależności przez \texttt{pip install --no-cache-dir}, automatyczną instrumentację Prometheus przez \texttt{prometheus-fastapi-instrumentator} (metryki HTTP na endpointcie \texttt{/metrics}) oraz endpoint \texttt{GET /health} wykorzystywany przez sondy Kubernetes.
+
+\begin{lstlisting}[language=Dockerfile, caption={Dockerfile — wzorzec wspólny dla wszystkich serwisów}, label={lst:dockerfile}]
+FROM python:3.12-slim
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY main.py .
+EXPOSE 8000
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+\end{lstlisting}
+
+Obrazy są budowane lokalnie i przesyłane do GCP Artifact Registry, skąd GKE pobiera je automatycznie podczas wdrażania na podstawie pola \texttt{image} w Deployment.
+
+\subsection{CPU-service}
+
+CPU-service implementuje dwa endpointy obciążające procesor. \texttt{POST /process} akceptuje obraz w formacie multipart form-data i wykonuje potok przetwarzania CPU-intensywnego z biblioteką Pillow: konwersja do skali szarości, filtry BLUR, SHARPEN i FIND\_EDGES, ekstrakcja kanałów RGB z resize. Po przetworzeniu, dla każdego kanału obliczana jest entropia Shannona:
+
+\begin{equation}
+  H = -\sum_{i=0}^{255} p_i \log_2(p_i), \quad \text{gdzie } p_i = \frac{\text{histogram}[i]}{\text{total\_pixels}}
+\end{equation}
+
+\texttt{GET /fibonacci} oblicza $n$-tą liczbę Fibonacciego rekurencyjnym algorytmem o złożoności $O(2^{n})$, co gwarantuje wysokie zużycie CPU przy niewielkiej liczbie żądań.
+
+Serwis wystawia również niestandardowe metryki Prometheus: \texttt{cpu\_service\_images\_processed\_total} (Counter) oraz \texttt{cpu\_service\_processing\_duration\_seconds} (Histogram).
+
+\subsection{IO-service}
+
+IO-service symuluje operacje I/O przez dwa endpointy. \texttt{GET /query} wykonuje sekwencję wywołań \texttt{asyncio.sleep()} z konfigurowalnym opóźnieniem (parametr \texttt{delay}, domyślnie 100\,ms), liczbą kroków (parametr \texttt{steps}, domyślnie 3) i losowym rozrzutem (parametr \texttt{jitter}, $\pm20\%$). Całkowity czas odpowiedzi wynosi $\text{steps} \times \text{delay} \times (1 \pm \text{jitter})$, a procesor pozostaje bezczynny podczas oczekiwania.
+
+\texttt{GET /upstream} przekazuje żądanie do echo-server przez \texttt{httpx.AsyncClient}. Serwis wykorzystuje \texttt{asyncio.Semaphore(50)} do ograniczenia współbieżności oraz wystawia metryki: \texttt{io\_service\_queries\_total} (Counter), \texttt{io\_service\_upstream\_duration\_seconds} (Histogram) i \texttt{io\_service\_concurrent\_queries} (Gauge).
+
+\subsection{Echo-server i Memory-service}
+
+Echo-server jest minimalistycznym serwisem pomocniczym, udostępniającym endpointy \texttt{GET /health} i \texttt{POST /echo}, wyłączonym z macierzy badawczej. Memory-service implementuje pamięciową bazę klucz-wartość z limitem 10000 wpisów i endpointem badawczym \texttt{POST /cache/fill} do wypełniania cache danymi testowymi o kontrolowanym rozmiarze. Nie został włączony do głównej macierzy badawczej.
+
+\section{Konfiguracja Kubernetes}
+
+\subsection{Deploymenty}
+
+Każdy Deployment definiuje: początkową liczbę replik wynoszącą 2, politykę pobierania obrazów \texttt{imagePullPolicy: Always}, sondy liveness i readiness (\texttt{GET /health} co 10\,s, initialDelay 5\,s) oraz resource requests i limits zgodnie z Tabelą~\ref{tab:resource-allocation} (Rozdział~3).
+
+\subsection{HPA — trzy warianty}
+
+Dla cpu-service i io-service zdefiniowano po trzy warianty HPA (API \texttt{autoscaling/v2}, zakres 1--30 replik), różniące się wyłącznie typem metryki. HPA CPU używa progu 50\% średniego zużycia CPU liczonego względem wartości \texttt{resources.requests.cpu}, a nie względem limitu CPU kontenera. HPA Memory używa progu 70\% średniego zużycia pamięci. HPA Custom RPS używa progu 100 żądań na sekundę na Pod, z metryką dostarczaną przez prometheus-adapter. Pełne manifesty HPA są dostępne w repozytorium, a przykładowa konfiguracja HPA Custom RPS została przedstawiona w Rozdziale~3 (Listing~\ref{lst:hpa-custom-config}).
+
+\subsection{Services}
+
+Wszystkie serwisy aplikacyjne są typu \texttt{LoadBalancer}; GKE automatycznie tworzy zewnętrzny GCP LoadBalancer (Layer 4, TCP) i przydziela mu publiczny adres IP, na który kierowany jest ruch z maszyny k6-generator.
+
+\section{Infrastruktura monitorująca}
+
+\subsection{kube-prometheus-stack}
+
+Pakiet kube-prometheus-stack jest instalowany przez Helm, co zapewnia automatyczną konfigurację i spójność wersji wszystkich komponentów: Prometheusa, Grafany, kube-state-metrics, node-exporter oraz Prometheus Operatora. Parametr \texttt{grafana.service.type=LoadBalancer} eksponuje Grafanę publicznie, umożliwiając obserwację eksperymentów na żywo.
+
+\subsection{Prometheus Adapter}
+
+Prometheus Adapter v0.12.0 wdrażany jest przez osobne manifesty YAML (nie jest częścią pakietu Helm). Jego konfiguracja w ConfigMap definiuje reguły PromQL mapujące metryki Prometheusa na format Custom Metrics API:
+
+Reguły mapowania PromQL, przedstawione w Rozdziale~2 (Listing~\ref{lst:adapter-config}), definiują metryki \texttt{http\_requests\_per\_second} oraz \texttt{http\_requests\_inflight} dla każdego serwisu badawczego.
+
+\subsection{Grafana — dashboard i eksport}
+
+Autorski dashboard ,,Magisterka -- System Overview'' zawiera 16 paneli odświeżanych co 10 sekund, pokazujących RPS, zużycie CPU i pamięci per Pod, percentyle opóźnień, liczbę replik i stan HPA. Dla każdego scenariusza eksportowanych jest 5 zestawów CSV: \texttt{replicas.csv}, \texttt{cpu\_mcpu.csv}, \texttt{memory\_mb.csv}, \texttt{rps.csv} i \texttt{latency\_ms.csv}.
+
+\section{Skrypty automatyzujące}
+
+\subsection{run-tests.sh — orkiestracja eksperymentów}
+
+Skrypt \texttt{scripts/run-tests.sh} automatyzuje wykonanie wszystkich 8 scenariuszy badawczych. Działa na maszynie k6-generator (Compute Engine), która ma skonfigurowany dostęp do klastra GKE przez \texttt{kubectl}. Dla każdego scenariusza skrypt: przełącza HPA na odpowiednią strategię za pomocą funkcji \texttt{switch\_hpa}, resetuje Deployment do 1 repliki z oczekiwaniem na gotowość, uruchamia test k6 z ruchem kierowanym na adresy IP GCP LoadBalancer, zapisuje wyniki do \texttt{results/<scenario>/}. Po każdym scenariuszu następuje cooldown: skalowanie obu serwisów do 1 repliki, usunięcie HPA, odczekanie 120 sekund.
+
+Kluczowe funkcje, takie jak \texttt{switch\_hpa()} (przełączanie strategii HPA) i \texttt{cooldown()} (stabilizacja klastra między scenariuszami), są dostępne w repozytorium projektu.
+
+\section{Scenariusze testowe k6}
+
+Każdy skrypt k6 definiuje scenariusze obciążeniowe, progi akceptacji oraz mapowanie hostów na adresy IP GCP LoadBalancer. Scenariusze i progi akceptacji dla obu skryptów k6 są dostępne w repozytorium: \texttt{cpu-load-test.js} (Fibonacci 1$\rightarrow$50 VU, image processing 10 VU) oraz \texttt{io-load-test.js} (stałe zapytania 1$\rightarrow$100 VU, stress-test, external call).
+
+\section{Podsumowanie implementacji}
+
+Zaimplementowany system badawczy składa się z czterech mikroserwisów, infrastruktury monitorującej opartej na kube-prometheus-stack (Helm) oraz zestawu skryptów automatyzujących testy. Kluczowe cechy implementacji: pełna automatyzacja procesu badawczego przez skrypt \texttt{run-tests.sh}, deklaratywna konfiguracja wszystkich zasobów Kubernetes (możliwa do odtworzenia na dowolnym klastrze GKE), monitoring przez Prometheusa i Grafanę z eksportem 5 zestawów CSV na scenariusz oraz wykorzystanie GCP LoadBalancer zamiast port-forward dla realistycznych warunków sieciowych.

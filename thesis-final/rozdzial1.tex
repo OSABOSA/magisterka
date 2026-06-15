@@ -1,0 +1,111 @@
+% =============================================================================
+% Rozdział 1: Wstęp teoretyczny
+% =============================================================================
+\chapter{Wstęp teoretyczny}
+
+% ---------------------------------------------------------------------------
+\section{Motywacja i problem badawczy}
+% ---------------------------------------------------------------------------
+
+Systemy informatyczne dostarczane w modelu \textit{Software as a Service}, czyli SaaS, stoją przed podwójnym wyzwaniem: muszą jednocześnie obsługiwać zmienne obciążenie generowane przez wielu klientów, zwanych dalej tenantami, oraz utrzymywać przewidywalną wydajność przy racjonalnym koszcie infrastruktury. Współdzielenie zasobów obliczeniowych przez tenantów o różnych profilach aktywności, od lekkiego przeglądania dashboardu po masowy eksport danych, oznacza, że system nie może polegać na statycznym przydziale zasobów. Potrzebuje mechanizmu, który dynamicznie dostosuje liczbę jednostek obliczeniowych do bieżącego zapotrzebowania.
+
+W ekosystemie Kubernetes podstawowym narzędziem realizującym ten cel jest \textit{HorizontalPodAutoscaler}, czyli HPA: kontroler, który na podstawie obserwowanych metryk podejmuje decyzje o dodaniu lub usunięciu replik aplikacji. HPA działa reaktywnie: co 15 sekund porównuje bieżącą wartość wybranej metryki z zadanym progiem i na tej podstawie oblicza pożądaną liczbę replik. Prostota tego mechanizmu jest jego zaletą operacyjną, ale jednocześnie rodzi pytanie: \textbf{czy wybór metryki ma znaczenie dla skuteczności skalowania?}
+
+Intuicja inżynierska podpowiada, że dla aplikacji obliczeniowej, czyli CPU-bound, naturalnym wyborem będzie HPA oparty na zużyciu procesora, a dla aplikacji oczekującej na zewnętrzne odpowiedzi, czyli I/O-bound, będzie to HPA oparty na liczbie żądań. Problem w tym, że w praktyce zespoły wdrożeniowe rzadko analizują profil obciążeniowy swojej aplikacji przed skonfigurowaniem autoskalowania. Domyślna konfiguracja HPA, czyli metryka CPU z progiem 50\%, jest stosowana uniwersalnie, niezależnie od charakterystyki serwisu. W środowisku SaaS, gdzie jeden klaster obsługuje dziesiątki tenantów, konsekwencje błędnego doboru metryki mogą być poważne: od niedoskalowania, czyli spadku wydajności dla wszystkich tenantów, po przeskalowanie oznaczające niepotrzebny koszt infrastruktury chmurowej.
+
+Niniejsza praca podejmuje próbę systematycznego rozstrzygnięcia tej kwestii poprzez kontrolowane eksperymenty w środowisku Google Kubernetes Engine, czyli GKE. Zamiast zakładać z góry, która metryka jest najlepsza, badanie traktuje wybór metryki HPA jako zmienną niezależną i mierzy jej wpływ na kluczowe wskaźniki wydajnościowe: przepustowość, opóźnienia, czas reakcji na skalowanie oraz stopę błędów.
+
+% ---------------------------------------------------------------------------
+\section{Hipoteza badawcza, cel i zakres}
+% ---------------------------------------------------------------------------
+
+\subsection{Hipoteza}
+
+Hipoteza badawcza pracy brzmi:
+
+\begin{quote}
+\textit{Nie istnieje jedna uniwersalna metryka HPA: skuteczność strategii skalowania zależy od charakterystyki obciążeniowej aplikacji, czyli od jej profilu obciążeniowego. Błędny wybór metryki prowadzi do niedoskalowania lub przeskalowania.}
+\end{quote}
+
+Przez ,,skuteczność'' rozumie się zdolność HPA do wykrycia przeciążenia i dodania replik zanim opóźnienia odpowiedzi przekroczą akceptowalny próg, przy jednoczesnym unikaniu niepotrzebnego skalowania w górę gdy obciążenie jest niskie.
+
+\subsection{Cel i zadania}
+
+Celem pracy jest zaprojektowanie, implementacja oraz eksperymentalna walidacja prototypu skalowalnego systemu w modelu SaaS, ze szczególnym uwzględnieniem porównania trzech strategii HPA dla dwóch diametralnie różnych profili obciążeniowych. Cel ten został zrealizowany poprzez następujące zadania:
+
+\begin{enumerate}
+  \item Zaprojektowanie i implementacja dwóch mikroserwisów o skrajnie odmiennych charakterystykach: CPU-bound, realizującego przetwarzanie obrazu i obliczenia rekurencyjne, oraz I/O-bound, opartego na łańcuchach asynchronicznych opóźnień symulujących zapytania do zewnętrznych usług.
+  \item Przeprowadzenie kontrolowanych eksperymentów porównujących trzy strategie HPA: opartą na zużyciu CPU, opartą na zużyciu pamięci oraz opartą na niestandardowej metryce RPS, czyli liczbie żądań na sekundę, dostarczanej przez prometheus-adapter.
+  \item Analiza porównawcza efektywności strategii skalowania w macierzy badawczej $2 \times 3$, łączącej dwa typy obciążenia z~trzema strategiami HPA.
+  \item Sformułowanie rekomendacji praktycznych dotyczących doboru metryki HPA w zależności od charakterystyki aplikacji.
+\end{enumerate}
+
+\subsection{Zakres}
+
+Zakres pracy obejmuje analizę teoretyczną zagadnień związanych z systemami rozproszonymi i autoskalowaniem, budowę autorskiego rozwiązania systemowego w technologii Kubernetes na platformie Google Cloud, przygotowanie środowiska testowego z pełnym stosem monitorującym składającym się z~Prometheusa, Grafany i~narzędzia k6 oraz przeprowadzenie serii badań eksperymentalnych weryfikujących efektywność zastosowanych technik skalowania.
+
+% ---------------------------------------------------------------------------
+\section{Podstawy teoretyczne}
+% ---------------------------------------------------------------------------
+
+\subsection{Architektury skalowalne: od monolitu do mikroserwisów}
+
+Ewolucja architektur systemów rozproszonych, od monolitycznych aplikacji przez architekturę zorientowaną na usługi, czyli SOA, do współczesnego paradygmatu mikroserwisów, była w dużej mierze napędzana potrzebą elastycznego skalowania \cite{microservices2019}. W monolicie cała funkcjonalność systemu jest zawarta w jednej jednostce wdrożeniowej; skalowanie odbywa się przez uruchomienie wielu identycznych instancji całej aplikacji, co jest nieefektywne, gdy tylko wybrane komponenty wymagają dodatkowej mocy obliczeniowej. SOA wprowadziło podział na usługi komunikujące się przez Enterprise Service Bus, umożliwiając selektywne skalowanie kosztem złożoności warstwy integracyjnej. Mikroserwisy wynoszą tę ideę na kolejny poziom: każda funkcja biznesowa jest niezależną jednostką wdrożeniową z własnym cyklem życia, stosem technologicznym i, co kluczowe z perspektywy tej pracy, własną polityką skalowania. To właśnie w architekturze mikroserwisowej precyzyjny dobór metryki HPA staje się decyzją o wymiernych konsekwencjach wydajnościowych i kosztowych.
+
+\subsection{Wzorce skalowania i autoskalowania}
+
+Skalowanie systemów realizuje się w trzech podstawowych wymiarach. Skalowanie pionowe, czyli vertical scaling, polega na zwiększaniu zasobów pojedynczej instancji (więcej CPU, więcej pamięci RAM). Jest ograniczone fizycznymi możliwościami sprzętu i nie zwiększa odporności na awarie. Skalowanie poziome, czyli horizontal scaling, zwiększa liczbę instancji obsługujących ruch, co rozkłada obciążenie i podnosi niezawodność, ale wymaga mechanizmów równoważenia obciążenia oraz koordynacji stanu. Trzeci wymiar, skalowanie automatyczne, czyli autoscaling, to dynamiczne dostosowywanie liczby instancji na podstawie obserwowanych metryk, bez interwencji operatora. W systemach chmurowych, gdzie koszty są proporcjonalne do wykorzystania zasobów, autoskalowanie jest nie tyle optymalizacją, co warunkiem koniecznym ekonomicznej eksploatacji.
+
+\subsection{Kubernetes i orkiestracja kontenerów}
+
+Kubernetes, w skrócie K8s, jest otwartą platformą do automatyzacji wdrażania, skalowania i zarządzania aplikacjami kontenerowymi, utrzymywaną przez Cloud Native Computing Foundation, czyli CNCF \cite{kubernetes2023}. Architektura klastra Kubernetes dzieli się na dwie warstwy. Control Plane, zarządzana przez Google w przypadku GKE, obejmuje API server, rozproszony magazyn stanu etcd, scheduler przydzielający Pody do węzłów oraz controller manager, w którym działa m.in. HorizontalPodAutoscaler \cite{kubernetes-hpa}. Worker Nodes to węzły wykonawcze, na których uruchamiane są Pody, czyli podstawowe jednostki obliczeniowe: grupy jednego lub więcej kontenerów współdzielących przestrzeń sieciową i woluminy. Pody są efemeryczne: mogą być tworzone, niszczone i przenoszone między węzłami, co czyni je naturalnym celem dla mechanizmów autoskalowania.
+
+\subsection{Mechanizmy autoskalowania w Kubernetes}
+
+\textbf{HorizontalPodAutoscaler}, czyli HPA, jest kontrolerem, który automatycznie dostosowuje liczbę replik w Deployment, ReplicaSet lub StatefulSet na podstawie obserwowanych metryk. Algorytm HPA działa według formuły:
+
+\begin{equation}
+  \text{desiredReplicas} = \left\lceil \text{currentReplicas} \times \frac{\text{currentMetricValue}}{\text{desiredMetricValue}} \right\rceil
+\end{equation}
+
+HPA w wersji API \texttt{autoscaling/v2}, wykorzystywanej w niniejszej pracy, obsługuje trzy typy metryk: resource metrics, czyli metryki zasobów kontenera (takie jak CPU i pamięć), dostarczane przez metrics-server; pods metrics, czyli metryki niestandardowe skojarzone z konkretnymi Podami, dostarczane przez zewnętrzne adaptery, np. prometheus-adapter; oraz object metrics, czyli metryki opisujące obiekty Kubernetes, również dostarczane przez adaptery.
+
+Dodatkowo, HPA implementuje mechanizmy stabilizacyjne zapobiegające zbyt częstym zmianom liczby replik. Okno stabilizacji skalowania w dół, czyli scale-down stabilization window, wynosi domyślnie 5 minut; HPA uwzględnia maksymalną wartość replik z tego okna przed podjęciem decyzji o redukcji. Tolerancja wynosząca 10\% oznacza, że metryka musi odchylić się o więcej niż 10\% od progu, aby wywołać skalowanie. Od wersji \texttt{autoscaling/v2} można również definiować polityki ograniczające tempo skalowania, np. maksymalnie 2 nowe repliki na 60 sekund.
+
+\textbf{VerticalPodAutoscaler}, czyli VPA, dostosowuje resource requests i limits dla kontenerów w Podzie, zmieniając ilość zasobów przydzielonych każdej replice zamiast liczby replik. \textbf{KEDA}, czyli Kubernetes Event-Driven Autoscaling, rozszerza HPA o skalowanie na podstawie zdarzeń z zewnętrznych systemów (na przykład długości kolejki Apache Kafka) oraz o możliwość skalowania do zera replik. VPA i KEDA nie są przedmiotem badań w niniejszej pracy, ale stanowią istotne kierunki dalszych prac.
+
+\subsection{Model SaaS i multi-tenancy}
+
+Model Software as a Service jest jedną z trzech podstawowych kategorii cloud computing (obok IaaS i PaaS), w której dostawca udostępnia użytkownikom gotową aplikację przez Internet, zarządzając całą infrastrukturą. Kluczową cechą SaaS jest wielodostępność, czyli multi-tenancy: architektoniczny wzorzec umożliwiający obsługę wielu klientów przez pojedynczą instancję systemu, przy zachowaniu logicznej izolacji danych i przewidywalnej wydajności dla każdego tenanta.
+
+W kontekście Kubernetes można wyróżnić kilka poziomów izolacji: od najlżejszego (application-level multi-tenancy, gdzie tenanci są rozróżniani przez nagłówek HTTP i współdzielą ten sam namespace), przez namespace-per-tenant, gdzie każdy tenant otrzymuje własny namespace z izolowanymi zasobami, aż po cluster-per-tenant, czyli dedykowany klaster dla każdego tenanta, zapewniający najwyższy poziom izolacji przy najwyższym koszcie. Współdzielenie infrastruktury oznacza, że decyzje HPA podejmowane w odpowiedzi na obciążenie jednego tenanta mogą wpływać na wydajność pozostałych; jest to jedno z głównych pytań motywujących niniejsze badanie.
+
+% ---------------------------------------------------------------------------
+\section{Przegląd literatury}
+% ---------------------------------------------------------------------------
+
+\subsection{Istniejące badania nad HPA}
+
+Problematyka autoskalowania w Kubernetes była przedmiotem licznych badań w ostatnich latach. Casalicchio i Perciballi \cite{huawei2021} przeprowadzili analizę porównawczą domyślnego HPA z KEDA, badając czas reakcji i wykorzystanie zasobów dla obciążeń o różnych profilach. Autorzy wykazali, że KEDA oferuje szybszy czas skalowania przy obciążeniach zdarzeniowych, ale domyślny HPA jest wystarczający dla obciążeń o stałym charakterze; nie analizowali jednak wpływu konkretnego wyboru metryki w obrębie samego HPA.
+
+Nguyen i Kim zaproponowali predykcyjny algorytm skalowania oparty na sieciach LSTM, czyli Long Short-Term Memory, który przewiduje przyszłe obciążenie i skaluje proaktywnie, redukując liczbę naruszeń SLA o 30\% w porównaniu do reaktywnego HPA. Podejście to wymaga jednak znacznych zasobów obliczeniowych na trenowanie modelu i nie zostało zweryfikowane w środowisku wielodostępnym SaaS.
+
+\subsection{Zidentyfikowane luki badawcze}
+
+Na podstawie przeglądu literatury zidentyfikowano następujące luki badawcze, które motywują niniejszą pracę:
+
+\begin{enumerate}
+  \item \textbf{Brak systematycznego porównania strategii HPA dla różnych profili obciążeniowych}: większość badań testuje HPA na jednorodnym obciążeniu (wyłącznie CPU-bound lub wyłącznie I/O-bound), nie analizując interakcji między profilem obciążeniowym a wyborem metryki.
+
+  \item \textbf{Ograniczona analiza HPA Memory}: strategia oparta na zużyciu pamięci jest rzadko badana empirycznie, ponieważ zakłada się z góry, że pamięć w większości aplikacji nie koreluje z obciążeniem. Niniejsza praca dostarcza danych eksperymentalnych weryfikujących to założenie.
+
+  \item \textbf{Brak badań łączących HPA z modelem SaaS}: istniejące badania nad multi-tenancy koncentrują się na izolacji danych i bezpieczeństwie, pomijając wpływ wielodostępności na efektywność autoskalowania.
+
+  \item \textbf{Brak systematycznej analizy zjawisk przejściowych}: istniejące publikacje koncentrują się na metrykach zagregowanych (średnim RPS czy średnim opóźnieniu), pomijając analizę zjawisk takich jak opóźnienie reakcji HPA, czyli HPA Lag, opóźnienie zimnego startu Podów, czyli Cold Start Latency, czy kaskadowe błędy przy CPU throttlingu. Niniejsza praca identyfikuje i dokumentuje te zjawiska na podstawie danych eksperymentalnych.
+\end{enumerate}
+
+% ---------------------------------------------------------------------------
+\section{Struktura pracy}
+% ---------------------------------------------------------------------------
+
+Praca składa się z sześciu rozdziałów. Rozdział 2 zawiera szczegółowy przegląd technologii wykorzystanych w projekcie, ze szczególnym uwzględnieniem komponentów, które nie zostały omówione w części teoretycznej: Google Kubernetes Engine jako zarządzanej platformy orkiestracji, stosu monitorującego kube-prometheus-stack, narzędzia do testów obciążeniowych k6 oraz prometheus-adapter jako mostka między metrykami aplikacyjnymi a API HPA. Rozdział 3 przedstawia projekt architektury systemu badawczego, w tym macierz badawczą $2 \times 3$, specyfikację mikroserwisów, trzy warianty HPA oraz plan eksperymentów. Rozdział 4 dokumentuje implementację: strukturę repozytorium, kod mikroserwisów, konfigurację Kubernetes i infrastrukturę monitorującą. Rozdział 5 zawiera wyniki badań eksperymentalnych przeprowadzonych na klastrze GKE wraz z ich analizą i interpretacją. Rozdział 6 zamyka pracę podsumowaniem, weryfikacją hipotezy, rekomendacjami praktycznymi oraz wskazaniem ograniczeń i dalszych kierunków badań.
